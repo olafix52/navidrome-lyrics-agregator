@@ -5,49 +5,51 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Docker Support](https://img.shields.io/badge/docker-ready-blue?logo=docker)](https://www.docker.com/)
 
-> **Automatyczny, asynchroniczny demon sidecar dla serwera muzycznego [Navidrome](https://www.navidrome.org/) pobierający zsynchronizowane teksty piosenek w najwyższej możliwej jakości (TTML słowo-po-słowie, Lyricsfile YAML oraz zsynchronizowany LRC).**
+> **An automated, asynchronous sidecar daemon for the [Navidrome](https://www.navidrome.org/) music server that fetches synchronized lyrics in the highest possible quality: syllable-by-syllable TTML, word-synced Lyricsfile YAML, and line-synced LRC.**
+
+*Read this in other languages: [English](README.md) | [Polski](README.pl.md)*
 
 ---
 
-## 🌟 Kluczowe funkcje
+## 🌟 Key Features
 
-- **Kaskada priorytetów (Quality Cascade) – 13 dostawców:**
-  1. `amll` – Apple Music-Like Lyrics DB (`.ttml` z sylabami i wieloma wokalistami).
-  2. `apple_music` – Apple Music Catalog / AMLL (`.ttml`).
-  3. `rmmrevival` – RMM Revival / Apple Music Worker (word-sync `.ttml` oraz `.lrc`).
-  4. `unison` – Społecznościowe API Better Lyrics Unison (`.ttml` / `.yaml` / `.lrc`).
-  5. `binilyrics` – BiniLyrics / Aligned REST API (`.ttml` / `.lrc`).
-  6. `lrclib` – LRCLIB Database (`.yaml` word-synced oraz `.lrc` line-synced).
-  7. `musixmatch` – Musixmatch Desktop API (RichSync word-sync `.ttml` oraz `.lrc`).
-  8. `qqmusic` – QQ Music / Tencent API (QRC word-sync `.ttml` oraz `.lrc`).
-  9. `kuwo` – Kuwo Music API (`.lrc`).
-  10. `netease` – NetEase Cloud Music 163 API (YRC word-sync `.ttml` oraz `.lrc`).
-  11. `kugou` – Kugou Music API (KRC word-sync `.ttml` oraz `.lrc`).
-  12. `lyricsify` – Baza Lyricsify (wsparcie FlareSolverr).
-  13. `genius` – Genius API + HTML Scraper (opcjonalny niesynchroniczny fallback).
+- **Quality Cascade – 13 Lyrics Providers:**
+  1. `amll` – Apple Music-Like Lyrics DB (TTML syllable-level sync and multi-singer support).
+  2. `apple_music` – Apple Music Catalog / AMLL lookup bridge (TTML).
+  3. `rmmrevival` – RMM Revival / Apple Music Worker (word-synced TTML & LRC).
+  4. `unison` – Crowdsourced Better Lyrics Unison API (TTML, YAML, LRC).
+  5. `binilyrics` – BiniLyrics / Aligned REST API (TTML & LRC).
+  6. `lrclib` – LRCLIB Database (word-synced YAML & line-synced LRC).
+  7. `musixmatch` – Musixmatch Desktop API (RichSync word-synced TTML & LRC).
+  8. `qqmusic` – QQ Music / Tencent API (QRC word-synced TTML & LRC).
+  9. `kuwo` – Kuwo Music API (synced LRC).
+  10. `netease` – NetEase Cloud Music 163 API (YRC word-synced TTML & LRC).
+  11. `kugou` – Kugou Music API (KRC word-synced TTML & LRC).
+  12. `lyricsify` – Lyricsify community database (with FlareSolverr support).
+  13. `genius` – Genius API + HTML scraper (optional unsynchronized fallback).
 
-- **Inteligentny Matching Engine:**
-  - Odczyt metadanych przez `mutagen` (`.flac`, `.mp3`, `.m4a`, `.opus`, `.ogg`, `.wav`, `.aiff`, etc.).
-  - Zaawansowana normalizacja tytułów (usuwanie `(Remastered)`, `[Official Audio]`, `feat.`, `(Live)`).
-  - Weryfikacja zgodności czasu trwania (domyślna tolerancja $\pm 2.5$ s).
-  - Weryfikacja podobieństwa tekstu i wykonawcy (Fuzzy String Similarity $\ge 0.75$).
+- **Intelligent Matching Engine:**
+  - Audio tag extraction powered by `mutagen` (`.flac`, `.mp3`, `.m4a`, `.opus`, `.ogg`, `.wav`, `.aiff`, etc.).
+  - Advanced title normalization (strips `(Remastered)`, `[Official Audio]`, `feat.`, `(Live)`, etc.).
+  - Song duration deviation guard (default tolerance: $\pm 2.5$ seconds).
+  - Fuzzy string similarity validation ($\ge 0.75$ threshold).
 
-- **Zarządzanie plikami Sidecar:**
-  - Sprawdzanie istniejących plików obok audio: `utwór.ttml` > `utwór.yaml` > `utwór.lrc`.
-  - Atomowy zapis (ochrona przed uszkodzeniem plików przy przerwaniu).
-  - Opcja automatycznego podbijania jakości (np. zamiana `.lrc` na `.ttml` jeśli znaleziono wersję sylabową).
+- **Sidecar File Management:**
+  - Existing file resolution order: `song.ttml` > `song.yaml` > `song.lrc`.
+  - Atomic writing to prevent file corruption during interrupts.
+  - Automatic quality upgrading (e.g. upgrades existing `.lrc` to `.ttml` when syllable-level sync becomes available).
 
-- **Tryby działania:**
-  - `scan` – jednorazowe przeskanowanie biblioteki z estetycznym paskiem postępu i podsumowaniem tabelarycznym.
-  - `daemon` – cykliczne skanowanie w tle (np. co 1 godzinę).
-  - `watch` – monitorowanie zmian na systemie plików w czasie rzeczywistym (`watchdog` z debouncingiem).
-  - `test-track` – szybkie testowanie odpytywania dostawców dla pojedynczego utworu bezpośrednio z konsoli.
+- **Operating Modes:**
+  - `scan` – One-time library scan with Rich terminal progress bars and tabular summary.
+  - `daemon` – Continuous scheduled scans in the background (e.g. every hour).
+  - `watch` – Real-time filesystem events monitor powered by `watchdog` with event debouncing.
+  - `test-track` – Rapid CLI provider query testing for a single artist and title without disk modifications.
 
 ---
 
-## 🚀 Szybki start z Docker Compose
+## 🚀 Quick Start with Docker Compose
 
-Najwygodniejszym sposobem uruchomienia jest spięcie kontenera w jednym stosie z Navidrome:
+The recommended deployment is pairing the aggregator container alongside Navidrome in your `docker-compose.yml`:
 
 ```yaml
 services:
@@ -81,45 +83,45 @@ services:
       - navidrome
 ```
 
-Uruchomienie:
+Launch the stack:
 ```bash
 docker compose up -d --build
 ```
 
 ---
 
-## 🛠️ Uruchomienie lokalne (bez Dockera)
+## 🛠️ Local Installation (Standalone)
 
-### Wymagania:
-- Python 3.11+
-- Zarządca pakietów `pip`
+### Requirements:
+- Python 3.11 or higher
+- `pip` package manager
 
 ```bash
-# 1. Klonowanie i instalacja zależności
+# 1. Clone repository and install dependencies
 git clone https://github.com/olafix52/navidrome-lyrics-agregator.git
 cd navidrome-lyrics-agregator
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Konfiguracja lokalna (opcjonalnie)
+# 2. Local configuration (optional)
 cp config.example.yaml config.local.yaml
 
-# 3. Jednorazowe przeskanowanie folderu z muzyką
-python -m src.main scan -d /sciezka/do/muzyki
+# 3. One-off library scan
+python -m src.main scan -d /path/to/music
 
-# 4. Testowe odpytanie dostawców dla pojedynczego utworu
+# 4. Test lyrics lookup for a single track
 python -m src.main test-track -a "Queen" -t "Bohemian Rhapsody"
 
-# 5. Uruchomienie demona w tle z nasłuchiwaniem plików
-python -m src.main daemon -d /sciezka/do/muzyki -i 1h --with-watch
+# 5. Run continuous daemon with real-time filesystem watcher
+python -m src.main daemon -d /path/to/music -i 1h --with-watch
 ```
 
 ---
 
-## ⚙️ Konfiguracja (`config.yaml` / `config.local.yaml`)
+## ⚙️ Configuration (`config.yaml` / `config.local.yaml`)
 
-Plik `config.yaml` (lub `config.example.yaml`) pozwala na pełne dostosowanie zachowania:
+Configuration can be fine-tuned via `config.yaml` (or `config.example.yaml`):
 
 ```yaml
 music_dir: "/music"
@@ -149,22 +151,22 @@ enabled_providers:
   - "genius"
 ```
 
-Każdą opcję można również skonfigurować za pomocą zmiennych środowiskowych z prefiksem `NLA_` (zobacz [.env.example](.env.example)):
-- `MUSIC_DIR` lub `NLA_MUSIC_DIR` – katalog z muzyką
-- `NLA_SCAN_INTERVAL` – interwał skanowania (np. `1h`, `30m`)
-- `NLA_CONCURRENCY` – liczba współbieżnych zapytań (np. `4`)
-- `NLA_OVERWRITE` – nadpisywanie istniejących tekstów (`true`/`false`)
-- `NLA_UPGRADE_QUALITY` – podbijanie jakości do TTML (`true`/`false`)
-- `NLA_LOG_LEVEL` – poziom logowania (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
+All parameters can also be configured using environment variables with the `NLA_` prefix (see [.env.example](.env.example)):
+- `MUSIC_DIR` or `NLA_MUSIC_DIR` – Path to audio collection directory
+- `NLA_SCAN_INTERVAL` – Daemon scan interval (e.g. `1h`, `30m`, `3600s`)
+- `NLA_CONCURRENCY` – Max concurrent download tasks (default: `4`)
+- `NLA_OVERWRITE` – Overwrite existing lyrics files (`true`/`false`)
+- `NLA_UPGRADE_QUALITY` – Upgrade lower quality lyrics to TTML (`true`/`false`)
+- `NLA_LOG_LEVEL` – Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
 > [!TIP]
-> Jeśli posiadasz własne klucze API (np. token deweloperski Apple Music lub token Genius), umieść je w pliku `config.local.yaml`. Plik ten jest automatycznie ignorowany przez Git i nie zostanie przypadkowo opublikowany.
+> If you have custom API tokens (e.g. Apple Music developer tokens or Genius client token), place them in `config.local.yaml`. This file is automatically ignored by Git and will never be committed.
 
 ---
 
-## 🧪 Testy jednostkowe
+## 🧪 Unit Tests
 
-Projekt posiada zestaw testów jednostkowych pokrywających parsowanie formatów TTML, LRC, Lyricsfile YAML, normalizację metadanych oraz logikę wszystkich providerów:
+Run the test suite covering TTML, LRC, and YAML parsers, metadata normalization, and provider responses:
 
 ```bash
 pytest
@@ -172,12 +174,12 @@ pytest
 
 ---
 
-## 🤝 Wkład w rozwój (Contributing)
+## 🤝 Contributing
 
-Chcesz pomóc w rozwoju projektu, dodać nowego dostawcę tekstów lub zgłosić błąd? Zapoznaj się z [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions, issues, and feature requests are welcome! Feel free to check the [CONTRIBUTING.md](CONTRIBUTING.md) guide before opening a PR.
 
 ---
 
-## 📄 Licencja
+## 📄 License
 
-Projekt udostępniany jest na licencji [MIT](LICENSE).
+This project is licensed under the terms of the [MIT License](LICENSE).
