@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Build & Distribution
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache/
+
+# Local configuration and credentials
+config.local.yaml
+config.private.yaml
+*.local.yaml
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Music & Data test folders
+music/
+data/

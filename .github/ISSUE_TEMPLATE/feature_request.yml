@@ -1,0 +1,30 @@
+name: "✨ Feature Request / Provider Suggestion"
+description: "Suggest a new idea or lyrics provider for this project"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping make Navidrome Lyrics Aggregator better!
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem or Opportunity"
+      description: "A clear description of what problem this feature solves or what provider is missing."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Proposed Solution"
+      description: "A clear description of what you want to happen, API docs links if applicable."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives Considered"
+      description: "Any alternative solutions or features you've considered."

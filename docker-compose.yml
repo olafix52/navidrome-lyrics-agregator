@@ -1,0 +1,40 @@
+services:
+  # ==============================================================================
+  # Navidrome Music Server
+  # ==============================================================================
+  navidrome:
+    image: deluan/navidrome:latest
+    container_name: navidrome
+    restart: unless-stopped
+    ports:
+      - "4533:4533"
+    environment:
+      ND_SCANSCHEDULE: 1h
+      ND_LOGLEVEL: info
+      ND_SESSIONTIMEOUT: 24h
+      ND_BASEURL: ""
+    volumes:
+      - ./data/navidrome:/data
+      - ./music:/music:ro
+
+  # ==============================================================================
+  # Navidrome Lyrics Aggregator (Sidecar)
+  # ==============================================================================
+  lyrics-aggregator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: navidrome-lyrics-aggregator
+    restart: unless-stopped
+    environment:
+      - MUSIC_DIR=/music
+      - NLA_SCAN_INTERVAL=1h
+      - NLA_LOG_LEVEL=INFO
+      - NLA_CONCURRENCY=4
+    volumes:
+      # Read-write mount required to save companion .ttml, .yaml, and .lrc files
+      - ./music:/music:rw
+      - ./config.yaml:/config/config.yaml:ro
+    command: ["daemon", "--with-watch"]
+    depends_on:
+      - navidrome

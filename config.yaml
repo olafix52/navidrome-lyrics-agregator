@@ -1,0 +1,147 @@
+# ==============================================================================
+# Navidrome Lyrics Aggregator - Configuration File
+# ==============================================================================
+
+# Directory where your music files reside (mounted volume in Docker)
+music_dir: "/music"
+
+# Periodic scan interval in daemon mode (e.g. "1h", "30m", "3600s", "1d")
+scan_interval: "1h"
+
+# Debounce time in seconds for real-time filesystem watcher events
+watch_debounce_seconds: 3.0
+
+# Allowed time deviation (in seconds) between audio duration and lyrics duration
+duration_tolerance_seconds: 2.5
+
+# Minimum similarity score (0.0 to 1.0) required to accept lyrics
+min_similarity_score: 0.75
+
+# Force re-scanning and overwriting existing lyrics files (.ttml, .yaml, .lrc)
+overwrite: false
+
+# Upgrade lower quality lyrics (.lrc/.txt) to higher quality formats (.ttml/.yaml) if found
+upgrade_quality: true
+
+# Dry run mode: search and log without saving any files to disk
+dry_run: false
+
+# Allow falling back to unsynced plain text lyrics if no synchronized lyrics are found
+allow_plain_lyrics: false
+
+# Concurrency and network settings
+concurrency: 4
+network_timeout: 10.0
+max_retries: 3
+
+# HTTP User-Agent header
+user_agent: "NavidromeLyricsAggregator/1.0 (https://github.com/navidrome-lyrics-aggregator)"
+
+# Logging verbosity: DEBUG, INFO, WARNING, ERROR
+log_level: "INFO"
+# Optional log file destination
+# log_file: "/config/aggregator.log"
+
+# ==============================================================================
+# Lyrics Providers Priority Cascade
+# The aggregator checks providers in the exact order listed below.
+# As soon as valid synchronized lyrics are matched, the cascade stops.
+# ==============================================================================
+enabled_providers:
+  - "amll"           # Apple Music-Like Lyrics DB (TTML syllable-level sync)
+  - "apple_music"    # Apple Music Catalog API / AMLL bridge (TTML)
+  - "rmmrevival"     # RMM Revival / Apple Music Worker (word-sync TTML & LRC)
+  - "unison"         # Unison / Better Lyrics crowdsourced synced lyrics (TTML/YAML/LRC)
+  - "binilyrics"     # BiniLyrics / Aligned REST API (TTML/LRC)
+  - "lrclib"         # LRCLIB Database (YAML word-synced and LRC line-synced)
+  - "musixmatch"     # Musixmatch Desktop API (RichSync TTML word-sync & synced LRC)
+  - "qqmusic"        # QQ Music / Tencent API (synced LRC)
+  - "kuwo"           # Kuwo Music API (synced LRC)
+  - "netease"        # NetEase Cloud Music 163 API (synced LRC)
+  - "kugou"          # Kugou Music API (synced LRC)
+  - "lyricsify"      # Lyricsify community LRC database
+  - "genius"         # Genius database (plain lyrics fallback)
+
+# ==============================================================================
+# Provider-Specific Configurations & API Settings
+# ==============================================================================
+providers:
+  amll:
+    enabled: true
+    rate_limit_per_second: 5.0
+    timeout_seconds: 10.0
+    # custom_url: "https://api.amll.dev"
+
+  apple_music:
+    enabled: true
+    rate_limit_per_second: 2.0
+    timeout_seconds: 10.0
+    # Optional Apple Music API credentials (if omitted, AMLL bridge is used):
+    # api_key: "Bearer YOUR_DEVELOPER_TOKEN"
+    # extra:
+    #   storefront: "us"
+    #   media_user_token: "YOUR_MEDIA_USER_TOKEN"
+
+  rmmrevival:
+    enabled: true
+    rate_limit_per_second: 2.0
+    timeout_seconds: 15.0
+    # custom_url: "https://lyrics.rmmreviv.al"
+
+  unison:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+    # custom_url: "https://unison.boidu.dev" # Public open crowdsourced database (no API key required)
+
+  binilyrics:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+    # custom_url: "https://lyrics-api.binimum.org"
+
+  lrclib:
+    enabled: true
+    rate_limit_per_second: 4.0
+    timeout_seconds: 10.0
+    # custom_url: "https://lrclib.net"
+
+  musixmatch:
+    enabled: true
+    rate_limit_per_second: 2.0
+    timeout_seconds: 10.0
+    # api_key: "YOUR_MUSIXMATCH_USER_TOKEN"
+
+  qqmusic:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+
+  kuwo:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+
+  netease:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+
+  kugou:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+
+  lyricsify:
+    enabled: true
+    rate_limit_per_second: 1.0
+    timeout_seconds: 30.0
+    extra:
+      flaresolverr_url: "http://localhost:8191/v1"
+    # custom_url: "https://www.lyricsify.com"
+
+  genius:
+    enabled: true
+    rate_limit_per_second: 1.5
+    timeout_seconds: 10.0
+    # api_key: "YOUR_GENIUS_API_CLIENT_ACCESS_TOKEN"
