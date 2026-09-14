@@ -4,6 +4,7 @@ import base64
 import logging
 import re
 from typing import Optional
+import urllib.parse
 import zlib
 
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
@@ -121,17 +122,13 @@ class KugouProvider(BaseLyricsProvider):
     async def get_lyrics(self, track: TrackMetadata) -> Optional[LyricsResult]:
         title = track.clean_title or clean_title(track.title)
         artist = track.clean_artist or clean_artist(track.artist)
-        keyword = f"{artist} - {title}".strip()
+        keyword = f"{artist} {title}".strip() if artist else title.strip()
 
-        # 1. Search song
-        search_params = {
-            "format": "json",
-            "keyword": keyword,
-            "page": 1,
-            "pagesize": 5,
-        }
+        # 1. Search song (encode spaces as %20 rather than '+' for Kugou API compatibility)
+        encoded_keyword = urllib.parse.quote(keyword)
+        search_url = f"{self.SEARCH_API}?format=json&keyword={encoded_keyword}&page=1&pagesize=5"
 
-        resp = await self.request_with_retry("GET", self.SEARCH_API, params=search_params)
+        resp = await self.request_with_retry("GET", search_url)
         if not resp:
             return None
 
@@ -179,16 +176,12 @@ class KugouProvider(BaseLyricsProvider):
 
                 # 2. Get lyric candidate
                 duration_ms = int(song_duration * 1000) if song_duration > 0 else int(track.duration * 1000)
-                krcs_params = {
-                    "ver": 1,
-                    "man": "yes",
-                    "client": "mobi",
-                    "keyword": keyword,
-                    "duration": duration_ms,
-                    "hash": file_hash,
-                }
+                krcs_url = (
+                    f"{self.KRCS_API}?ver=1&man=yes&client=mobi"
+                    f"&keyword={encoded_keyword}&duration={duration_ms}&hash={file_hash}"
+                )
 
-                krcs_resp = await self.request_with_retry("GET", self.KRCS_API, params=krcs_params)
+                krcs_resp = await self.request_with_retry("GET", krcs_url)
                 if not krcs_resp:
                     continue
 
@@ -208,16 +201,12 @@ class KugouProvider(BaseLyricsProvider):
                 candidate_artist = song_artist or artist
 
                 # 3. Download lyric - First attempt KRC (word_sync)
-                dl_params_krc = {
-                    "ver": 1,
-                    "client": "pc",
-                    "id": candidate_id,
-                    "accesskey": access_key,
-                    "fmt": "krc",
-                    "charset": "utf8",
-                }
+                dl_url_krc = (
+                    f"{self.DOWNLOAD_API}?ver=1&client=pc"
+                    f"&id={candidate_id}&accesskey={access_key}&fmt=krc&charset=utf8"
+                )
 
-                dl_resp = await self.request_with_retry("GET", self.DOWNLOAD_API, params=dl_params_krc)
+                dl_resp = await self.request_with_retry("GET", dl_url_krc)
                 if dl_resp:
                     try:
                         dl_data = dl_resp.json()
@@ -261,15 +250,11 @@ class KugouProvider(BaseLyricsProvider):
                         logger.debug(f"[{self.name}] Error decrypting/converting KRC: {e}")
 
                 # 4. Fallback to LRC (line_sync)
-                dl_params_lrc = {
-                    "ver": 1,
-                    "client": "pc",
-                    "id": candidate_id,
-                    "accesskey": access_key,
-                    "fmt": "lrc",
-                    "charset": "utf8",
-                }
-                dl_lrc_resp = await self.request_with_retry("GET", self.DOWNLOAD_API, params=dl_params_lrc)
+                dl_url_lrc = (
+                    f"{self.DOWNLOAD_API}?ver=1&client=pc"
+                    f"&id={candidate_id}&accesskey={access_key}&fmt=lrc&charset=utf8"
+                )
+                dl_lrc_resp = await self.request_with_retry("GET", dl_url_lrc)
                 if dl_lrc_resp:
                     try:
                         dl_lrc_data = dl_lrc_resp.json()
