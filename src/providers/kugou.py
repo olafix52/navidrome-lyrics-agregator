@@ -114,7 +114,7 @@ class KugouProvider(BaseLyricsProvider):
     name = "kugou"
     description = "Kugou Music Database (KRC word-sync TTML & synced LRC lyrics)"
 
-    SEARCH_API = "https://mobilecdn.kugou.com/api/v3/search/song"
+    SEARCH_API = "https://mobileservice.kugou.com/api/v3/search/song"
     KRCS_API = "https://krcs.kugou.com/search"
     DOWNLOAD_API = "https://lyrics.kugou.com/download"
 
