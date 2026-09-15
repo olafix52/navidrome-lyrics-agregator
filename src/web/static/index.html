@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Navidrome Lyrics Aggregator - Dashboard & Karaoke</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/lyrics.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- TOP HEADER -->
+    <header class="app-header">
+      <div class="logo-area">
+        <span class="logo-icon">🎵</span>
+        <div>
+          <h1>Navidrome Lyrics Aggregator</h1>
+          <span class="subtitle">Panel zarządzania biblioteką i karaoke na żywo</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="musicDirBadge" class="badge badge-dim">Folder: wczytywanie...</span>
+        <button id="refreshStatsBtn" class="btn btn-secondary">🔄 Odśwież audyt</button>
+      </div>
+    </header>
+
+    <!-- DASHBOARD / METRICS SECTION -->
+    <section class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Wszystkie utwory</div>
+        <div id="statTotalTracks" class="metric-value">0</div>
+        <div class="metric-sub" id="statCoveragePct">0% z tekstami</div>
+      </div>
+      <div class="metric-card card-accent-green">
+        <div class="metric-label">Word-sync (TTML / YAML)</div>
+        <div id="statWordSync" class="metric-value text-green">0</div>
+        <div class="metric-sub" id="statWordSyncPct">0% biblioteki</div>
+      </div>
+      <div class="metric-card card-accent-yellow">
+        <div class="metric-label">Line-sync (LRC)</div>
+        <div id="statLineSync" class="metric-value text-yellow">0</div>
+        <div class="metric-sub" id="statLineSyncPct">0% biblioteki</div>
+      </div>
+      <div class="metric-card card-accent-red">
+        <div class="metric-label">Brakujące teksty</div>
+        <div id="statMissing" class="metric-value text-red">0</div>
+        <div class="metric-sub" id="statMissingPct">0% biblioteki</div>
+      </div>
+      <div class="metric-card chart-card">
+        <div class="chart-header">
+          <span class="metric-label">Pokrycie tekstami</span>
+          <div id="formatPills" class="format-pills"></div>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="coverageChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- MAIN TWO-COLUMN WORKSPACE -->
+    <main class="main-layout">
+      <!-- LEFT COLUMN: TRACK EXPLORER -->
+      <section class="tracks-panel">
+        <div class="panel-header">
+          <h2>Biblioteka utworów</h2>
+          <div class="search-box">
+            <input type="text" id="trackSearchInput" placeholder="Szukaj wykonawcy, tytułu lub pliku..." />
+          </div>
+        </div>
+
+        <div class="filter-tabs">
+          <button class="tab-btn active" data-filter="all">Wszystkie</button>
+          <button class="tab-btn" data-filter="missing">Brakujące</button>
+          <button class="tab-btn" data-filter="has_lyrics">Z tekstami</button>
+          <button class="tab-btn" data-filter="word_sync">Word-Sync</button>
+          <button class="tab-btn" data-filter="line_sync">Line-Sync</button>
+        </div>
+
+        <div class="table-container">
+          <table class="tracks-table">
+            <thead>
+              <tr>
+                <th>Tytuł i Wykonawca</th>
+                <th>Format</th>
+                <th>Status</th>
+                <th>Akcje</th>
+              </tr>
+            </thead>
+            <tbody id="tracksTableBody">
+              <tr>
+                <td colspan="4" class="text-center text-dim">Ładowanie utworów...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination-bar">
+          <span id="pageInfo" class="page-info">Strona 1</span>
+          <div class="pagination-buttons">
+            <button id="prevPageBtn" class="btn btn-sm btn-secondary" disabled>Poprzednia</button>
+            <button id="nextPageBtn" class="btn btn-sm btn-secondary">Następna</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT COLUMN: PLAYER & LIVE KARAOKE STAGE -->
+      <section class="player-karaoke-panel">
+        <div class="panel-header">
+          <div class="now-playing-header">
+            <h2 id="nowPlayingTitle">Wybierz utwór z listy</h2>
+            <div id="nowPlayingMeta" class="text-dim">Brak aktywnego utworu</div>
+          </div>
+          <div class="header-right-actions">
+            <button id="openSearchModalBtn" class="btn btn-primary btn-sm" style="display:none;">
+              🔍 Zmień wersję tekstu
+            </button>
+            <button id="toggleRawBtn" class="btn btn-secondary btn-sm" style="display:none;">
+              📄 Pokaż źródło
+            </button>
+          </div>
+        </div>
+
+        <!-- HTML5 AUDIO PLAYER CONTROLS -->
+        <div class="player-widget">
+          <audio id="audioPlayer" preload="metadata"></audio>
+          <div class="timeline-row">
+            <span id="currentTimeLabel" class="time-label">00:00</span>
+            <input type="range" id="seekSlider" class="seek-slider" min="0" max="100" value="0" step="0.1" />
+            <span id="durationLabel" class="time-label">00:00</span>
+          </div>
+          <div class="controls-row">
+            <button id="playPauseBtn" class="btn-play-pause">▶</button>
+            <div class="volume-box">
+              <span>🔊</span>
+              <input type="range" id="volumeSlider" min="0" max="1" step="0.05" value="1" />
+            </div>
+          </div>
+        </div>
+
+        <!-- TOXIPLAYS TTML RENDERER CONTAINER & TOOLBAR -->
+        <div class="lyrics-outer apple-music" id="lyricsOuter">
+          <div class="lyrics-toolbar">
+            <div class="style-selector-group">
+              <span class="text-dim">Styl:</span>
+              <button class="style-btn active" id="styleAmlBtn" title="Apple Music (AMLL) bold style">Apple Music</button>
+              <button class="style-btn" id="styleKaraokeBtn" title="Glowing Karaoke style">Karaoke Glow</button>
+            </div>
+            <div class="theme-chips" title="Zmień kolor poświaty">
+              <span class="text-dim">Glow:</span>
+              <button class="theme-chip active" data-color="#e8f440" style="background:#e8f440;" title="Apple Music Yellow"></button>
+              <button class="theme-chip" data-color="#ff4d6d" style="background:#ff4d6d;" title="Neon Pink"></button>
+              <button class="theme-chip" data-color="#38bdf8" style="background:#38bdf8;" title="Cyan Blue"></button>
+              <button class="theme-chip" data-color="#34d399" style="background:#34d399;" title="Emerald Green"></button>
+              <button class="theme-chip" data-color="#ffffff" style="background:#ffffff;" title="Pure White"></button>
+            </div>
+          </div>
+          <div id="lyrics-container">
+            <div class="empty-state">
+              <div class="empty-icon">🎤</div>
+              <div class="big">KARAOKE & TTML</div>
+              <div class="sub">Wybierz utwór z biblioteki po lewej stronie, aby uruchomić odtwarzanie i podgląd na żywo z animacjami sylabowymi.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RAW LYRICS PREVIEW (HIDDEN BY DEFAULT) -->
+        <div id="rawLyricsContainer" class="raw-lyrics-container" style="display:none;">
+          <pre id="rawLyricsPre"></pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- MODAL: MANUAL PROVIDER SEARCH & ALTERNATIVE VERSION SELECTOR -->
+  <div id="searchModal" class="modal-backdrop" style="display:none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>Szukaj alternatywnej wersji tekstu</h3>
+          <p class="text-dim">Odpytanie 13 dostawców (QQMusic, Kugou, NetEase, AMLL, Musixmatch i inni)</p>
+        </div>
+        <button id="closeModalBtn" class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="search-form-grid">
+          <div class="form-group">
+            <label>Wykonawca</label>
+            <input type="text" id="modalArtistInput" />
+          </div>
+          <div class="form-group">
+            <label>Tytuł utworu</label>
+            <input type="text" id="modalTitleInput" />
+          </div>
+          <div class="form-group-btn">
+            <button id="modalExecuteSearchBtn" class="btn btn-primary">🔍 Szukaj u dostawców</button>
+          </div>
+        </div>
+
+        <div id="modalLoadingSpinner" class="modal-loading" style="display:none;">
+          <div class="spinner"></div>
+          <p>Przeszukiwanie 13 baz tekstów w toku...</p>
+        </div>
+
+        <div id="candidatesList" class="candidates-list">
+          <div class="text-dim text-center py-4">Wpisz wykonawcę i tytuł, a następnie kliknij „Szukaj u dostawców”.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

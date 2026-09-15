@@ -247,6 +247,36 @@ async def run_prune_command(args: argparse.Namespace, config) -> None:
             console.print(f"[bold green]Successfully deleted {count} obsolete/orphaned files.[/bold green]\n")
 
 
+async def run_web_command(args: argparse.Namespace, config) -> None:
+    """Launch the Web UI dashboard and live karaoke player server."""
+    import uvicorn
+    from src.web.server import create_app
+
+    if getattr(args, "music_dir", None):
+        config.music_dir = Path(args.music_dir)
+    elif getattr(args, "path", None):
+        config.music_dir = Path(args.path)
+
+    host = getattr(args, "host", "0.0.0.0") or "0.0.0.0"
+    port = getattr(args, "port", 8080) or 8080
+
+    app = create_app(config)
+
+    console.print(f"[bold green]Starting Web UI & Karaoke Dashboard at:[/bold green] http://{host}:{port}")
+    console.print(f"[dim]Serving music library from:[/dim] {config.music_dir}")
+
+    server_config = uvicorn.Config(
+        app=app,
+        host=host,
+        port=port,
+        log_level=config.log_level.lower(),
+        access_log=False,
+    )
+    server = uvicorn.Server(server_config)
+    await server.serve()
+
+
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build command line argument parser."""
@@ -341,6 +371,14 @@ def build_parser() -> argparse.ArgumentParser:
     prune_p.add_argument("--orphans-only", action="store_true", help="Only delete orphaned sidecars without audio")
     prune_p.add_argument("--duplicates-only", action="store_true", help="Only delete duplicate lower-quality sidecars")
 
+    # WEB / DASHBOARD subcommand
+    for cmd_name in ["web", "dashboard"]:
+        web_p = subparsers.add_parser(cmd_name, help="Launch lightweight Web UI dashboard and live karaoke player")
+        web_p.add_argument("path", nargs="?", type=str, help="Root music directory (positional)")
+        web_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+        web_p.add_argument("-p", "--port", type=int, default=8080, help="Web server port (default: 8080)")
+        web_p.add_argument("--host", type=str, default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
+
     return parser
 
 
@@ -404,6 +442,8 @@ def main() -> None:
             await run_upgrade_command(args, config)
         elif command == "prune":
             await run_prune_command(args, config)
+        elif command in ("web", "dashboard"):
+            await run_web_command(args, config)
         else:
             parser.print_help()
 

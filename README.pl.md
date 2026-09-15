@@ -47,6 +47,7 @@
   - `audit` (lub `stats`) – szybki audyt biblioteki offline (podsumowanie pokrycia word-sync TTML/YAML, line-sync LRC, unsynced, missing) z tabelami Rich i eksportem do JSON/CSV.
   - `upgrade` – celowane skanowanie podbijające teksty niższej jakości (`.lrc`, `.txt`) lub brakujące do word-sync TTML z automatycznym pomijaniem istniejących `.ttml`.
   - `prune` – bezpieczne narzędzie do wykrywania i usuwania osieroconych plików tekstów oraz przestarzałych duplikatów (domyślnie symulacja dry-run).
+  - `web` (lub `dashboard`) – lekki panel Web UI z wykresem pokrycia biblioteki, odtwarzaczem karaoke na żywo oraz ręczną wyszukiwarką i selektorem alternatywnych wersji tekstów.
 
 ---
 
@@ -129,6 +130,9 @@ python -m src.main upgrade -d /sciezka/do/muzyki
 # 8. Czyszczenie osieroconych plików i duplikatów (domyślnie bezpieczna symulacja)
 python -m src.main prune -d /sciezka/do/muzyki
 python -m src.main prune -d /sciezka/do/muzyki --force
+
+# 9. Uruchomienie lekkiego panelu Web UI i odtwarzacza karaoke
+python -m src.main web -p 8080 -d /sciezka/do/muzyki
 ```
 
 ---

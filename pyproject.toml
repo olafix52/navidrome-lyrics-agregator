@@ -43,6 +43,8 @@ dependencies = [
     "watchdog>=4.0.0",
     "rich>=13.7.1",
     "beautifulsoup4>=4.12.3",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
 ]
 
 [project.optional-dependencies]

@@ -47,6 +47,7 @@
   - `audit` (or `stats`) – Fast offline audit of the music library reporting lyrics coverage (word-sync TTML/YAML, line-sync LRC, unsynced, missing) with Rich tables and JSON/CSV export.
   - `upgrade` – Targeted scan that queries providers only for tracks lacking word-sync lyrics, automatically skipping existing `.ttml` tracks.
   - `prune` – Safe housekeeping tool to detect and remove orphaned lyrics files or obsolete lower-quality duplicates (safe dry-run by default).
+  - `web` (or `dashboard`) – Lightweight Web UI with library coverage chart, live karaoke music player, and manual search & alternative lyrics selector.
 
 ---
 
@@ -129,6 +130,9 @@ python -m src.main upgrade -d /path/to/music
 # 8. Prune orphaned sidecars and obsolete duplicates (dry-run by default)
 python -m src.main prune -d /path/to/music
 python -m src.main prune -d /path/to/music --force
+
+# 9. Launch lightweight Web UI & live karaoke player
+python -m src.main web -p 8080 -d /path/to/music
 ```
 
 ---
