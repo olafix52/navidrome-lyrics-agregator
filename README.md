@@ -39,11 +39,14 @@
   - Atomic writing to prevent file corruption during interrupts.
   - Automatic quality upgrading (e.g. upgrades existing `.lrc` to `.ttml` when syllable-level sync becomes available).
 
-- **Operating Modes:**
+- **Operating Modes & Library Tools:**
   - `scan` – One-time library scan with Rich terminal progress bars and tabular summary.
   - `daemon` – Continuous scheduled scans in the background (e.g. every hour).
   - `watch` – Real-time filesystem events monitor powered by `watchdog` with event debouncing.
   - `test-track` – Rapid CLI provider query testing for a single artist and title without disk modifications.
+  - `audit` (or `stats`) – Fast offline audit of the music library reporting lyrics coverage (word-sync TTML/YAML, line-sync LRC, unsynced, missing) with Rich tables and JSON/CSV export.
+  - `upgrade` – Targeted scan that queries providers only for tracks lacking word-sync lyrics, automatically skipping existing `.ttml` tracks.
+  - `prune` – Safe housekeeping tool to detect and remove orphaned lyrics files or obsolete lower-quality duplicates (safe dry-run by default).
 
 ---
 
@@ -115,6 +118,17 @@ python -m src.main test-track -a "Queen" -t "Bohemian Rhapsody"
 
 # 5. Run continuous daemon with real-time filesystem watcher
 python -m src.main daemon -d /path/to/music -i 1h --with-watch
+
+# 6. Offline library audit & export missing lyrics
+python -m src.main audit -d /path/to/music --show-missing
+python -m src.main audit -d /path/to/music --export-missing missing.csv
+
+# 7. Upgrade lower-quality lyrics to TTML
+python -m src.main upgrade -d /path/to/music
+
+# 8. Prune orphaned sidecars and obsolete duplicates (dry-run by default)
+python -m src.main prune -d /path/to/music
+python -m src.main prune -d /path/to/music --force
 ```
 
 ---

@@ -8,13 +8,15 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from src.audit import LibraryAuditor, LibraryPruner
 from src.config import load_config
 from src.logger import console, setup_logger
 from src.matcher import LyricsMatcher
-from src.models import TrackMetadata
+from src.models import LyricsFormat, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
 from src.scanner import LibraryScanner
+from src.storage import get_existing_lyrics_file
 from src.watcher import DirectoryWatcher
 
 
@@ -150,6 +152,102 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
     await matcher.close()
 
 
+async def run_audit_command(args: argparse.Namespace, config) -> None:
+    """Execute offline library audit and coverage reporting."""
+    target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
+    target_path = Path(target_str) if target_str else config.music_dir
+
+    console.print(f"[bold cyan]Running offline lyrics audit on:[/bold cyan] {target_path}")
+    auditor = LibraryAuditor()
+    show_missing_limit = getattr(args, "show_missing", 0) or 0
+    needs_meta = bool(getattr(args, "export_missing", None) or (show_missing_limit > 0))
+    report = auditor.audit_library(target_path, load_metadata_for_missing=needs_meta)
+    auditor.display_report(report, show_missing_limit=show_missing_limit)
+
+    if getattr(args, "export_missing", None):
+        auditor.export_report(report, Path(args.export_missing), missing_only=True)
+        console.print(f"[bold green]✓ Exported missing tracks to:[/bold green] {args.export_missing}")
+
+    if getattr(args, "export_report", None):
+        auditor.export_report(report, Path(args.export_report), missing_only=False)
+        console.print(f"[bold green]✓ Exported full audit report to:[/bold green] {args.export_report}")
+
+
+async def run_upgrade_command(args: argparse.Namespace, config) -> None:
+    """Scan and upgrade tracks with missing or lower-quality lyrics (to TTML word-sync)."""
+    if args.force:
+        config.overwrite = True
+    if args.dry_run:
+        config.dry_run = True
+    if args.allow_plain:
+        config.allow_plain_lyrics = True
+    if args.concurrency:
+        config.concurrency = args.concurrency
+    if args.music_dir:
+        config.music_dir = Path(args.music_dir)
+
+    target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
+    target_path = Path(target_str) if target_str else config.music_dir
+
+    providers = build_provider_cascade(config)
+    matcher = LyricsMatcher(config, providers)
+    scanner = LibraryScanner(config, matcher)
+
+    try:
+        all_audio = scanner.discover_audio_files(target_path)
+        console.print(f"[bold cyan]Discovered {len(all_audio)} total tracks in:[/bold cyan] {target_path}")
+
+        candidates = []
+        for audio_path in all_audio:
+            existing = get_existing_lyrics_file(audio_path)
+            if existing:
+                _, fmt = existing
+                if not args.force and fmt in (LyricsFormat.TTML, LyricsFormat.YAML):
+                    # Already top-tier word-sync lyrics, skip
+                    continue
+                if args.only_missing:
+                    # Track already has lyrics, skip because only_missing requested
+                    continue
+                candidates.append(audio_path)
+            else:
+                if args.only_lrc:
+                    # Track has no lyrics, skip because only_lrc requested
+                    continue
+                candidates.append(audio_path)
+
+        console.print(f"[bold green]Tracks targeted for upgrade/fetch:[/bold green] {len(candidates)} of {len(all_audio)}")
+        if not candidates:
+            console.print("[green]All tracks already have top quality lyrics! Nothing to upgrade.[/green]")
+            return
+
+        await scanner.process_files(candidates, show_progress=not args.no_progress)
+    finally:
+        await matcher.close()
+
+
+async def run_prune_command(args: argparse.Namespace, config) -> None:
+    """Execute library pruning of orphaned lyrics and obsolete lower-quality duplicates."""
+    target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
+    target_path = Path(target_str) if target_str else config.music_dir
+
+    pruner = LibraryPruner()
+    orphans = [] if args.duplicates_only else pruner.find_orphaned_sidecars(target_path)
+    duplicates = [] if args.orphans_only else pruner.find_duplicate_sidecars(target_path)
+
+    dry_run = not args.force
+    if args.dry_run:
+        dry_run = True
+
+    pruner.display_prune_summary(orphans, duplicates, dry_run=dry_run)
+
+    if not dry_run:
+        files_to_delete = list(orphans) + [dup for dup, _ in duplicates]
+        if files_to_delete:
+            count = pruner.execute_prune(files_to_delete, dry_run=False)
+            console.print(f"[bold green]Successfully deleted {count} obsolete/orphaned files.[/bold green]\n")
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build command line argument parser."""
     parser = argparse.ArgumentParser(
@@ -205,6 +303,43 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("-a", "--artist", type=str, required=True, help="Track artist")
     test_p.add_argument("--album", type=str, help="Track album name")
     test_p.add_argument("--duration", type=float, default=0.0, help="Track duration in seconds")
+
+    # AUDIT / STATS subcommand
+    for cmd_name in ["audit", "stats"]:
+        audit_p = subparsers.add_parser(cmd_name, help="Analyze library lyrics coverage and formats offline")
+        audit_p.add_argument("path", nargs="?", type=str, help="Target folder or file to audit (positional)")
+        audit_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+        audit_p.add_argument("--export-missing", type=str, help="Export missing tracks to JSON or CSV file")
+        audit_p.add_argument("--export-report", type=str, help="Export full audit report to JSON or CSV file")
+        audit_p.add_argument(
+            "--show-missing",
+            nargs="?",
+            const=20,
+            type=int,
+            default=0,
+            help="Show missing tracks sample in terminal (default: 20)",
+        )
+
+    # UPGRADE subcommand
+    upgrade_p = subparsers.add_parser("upgrade", help="Fetch word-sync TTML lyrics for tracks lacking them")
+    upgrade_p.add_argument("path", nargs="?", type=str, help="Target folder or file to upgrade (positional)")
+    upgrade_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    upgrade_p.add_argument("--only-lrc", action="store_true", help="Only upgrade tracks that already have line-sync/plain lyrics")
+    upgrade_p.add_argument("--only-missing", action="store_true", help="Only download lyrics for tracks with no lyrics at all")
+    upgrade_p.add_argument("-f", "--force", action="store_true", help="Force re-fetching even if TTML already exists")
+    upgrade_p.add_argument("--dry-run", action="store_true", help="Simulate upgrade without writing files")
+    upgrade_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
+    upgrade_p.add_argument("--concurrency", type=int, help="Number of concurrent download tasks")
+    upgrade_p.add_argument("--no-progress", action="store_true", help="Disable rich progress bar")
+
+    # PRUNE subcommand
+    prune_p = subparsers.add_parser("prune", help="Clean up orphaned sidecars and obsolete duplicate formats")
+    prune_p.add_argument("path", nargs="?", type=str, help="Target folder to prune (positional)")
+    prune_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    prune_p.add_argument("--dry-run", action="store_true", help="Simulate prune without deleting files (default)")
+    prune_p.add_argument("-f", "--force", action="store_true", help="Perform actual deletion of files")
+    prune_p.add_argument("--orphans-only", action="store_true", help="Only delete orphaned sidecars without audio")
+    prune_p.add_argument("--duplicates-only", action="store_true", help="Only delete duplicate lower-quality sidecars")
 
     return parser
 
@@ -263,6 +398,12 @@ def main() -> None:
             await run_watch_command(args, config)
         elif command == "test-track":
             await run_test_track_command(args, config)
+        elif command in ("audit", "stats"):
+            await run_audit_command(args, config)
+        elif command == "upgrade":
+            await run_upgrade_command(args, config)
+        elif command == "prune":
+            await run_prune_command(args, config)
         else:
             parser.print_help()
 

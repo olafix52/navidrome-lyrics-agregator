@@ -42,19 +42,13 @@ class LibraryScanner:
 
         return sorted(audio_files)
 
-    async def scan_and_process(
+    async def process_files(
         self,
-        target_dir: Optional[Path] = None,
+        audio_files: List[Path],
         show_progress: bool = True,
     ) -> List[ProcessResult]:
-        """Scan directory and download missing lyrics for all discovered audio files."""
-        root = target_dir or self.config.music_dir
-        logger.info(f"Scanning directory for audio tracks: {root}")
-
-        audio_files = self.discover_audio_files(root)
+        """Process a list of audio files concurrently and download missing/upgraded lyrics."""
         total_files = len(audio_files)
-        logger.info(f"Discovered {total_files} audio files")
-
         if total_files == 0:
             return []
 
@@ -93,6 +87,20 @@ class LibraryScanner:
 
         self.display_summary(results)
         return results
+
+    async def scan_and_process(
+        self,
+        target_dir: Optional[Path] = None,
+        show_progress: bool = True,
+    ) -> List[ProcessResult]:
+        """Scan directory and download missing lyrics for all discovered audio files."""
+        root = target_dir or self.config.music_dir
+        logger.info(f"Scanning directory for audio tracks: {root}")
+
+        audio_files = self.discover_audio_files(root)
+        logger.info(f"Discovered {len(audio_files)} audio files")
+
+        return await self.process_files(audio_files, show_progress=show_progress)
 
     async def _process_single_file(self, file_path: Path) -> ProcessResult:
         """Read metadata and invoke lyrics matcher on a single file."""

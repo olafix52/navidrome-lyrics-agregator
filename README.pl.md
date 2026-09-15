@@ -39,11 +39,14 @@
   - Atomowy zapis (ochrona przed uszkodzeniem plików przy przerwaniu).
   - Opcja automatycznego podbijania jakości (np. zamiana `.lrc` na `.ttml` jeśli znaleziono wersję sylabową).
 
-- **Tryby działania:**
+- **Tryby działania i narzędzia biblioteczne:**
   - `scan` – jednorazowe przeskanowanie biblioteki z estetycznym paskiem postępu i podsumowaniem tabelarycznym.
   - `daemon` – cykliczne skanowanie w tle (np. co 1 godzinę).
   - `watch` – monitorowanie zmian na systemie plików w czasie rzeczywistym (`watchdog` z debouncingiem).
   - `test-track` – szybkie testowanie odpytywania dostawców dla pojedynczego utworu bezpośrednio z konsoli.
+  - `audit` (lub `stats`) – szybki audyt biblioteki offline (podsumowanie pokrycia word-sync TTML/YAML, line-sync LRC, unsynced, missing) z tabelami Rich i eksportem do JSON/CSV.
+  - `upgrade` – celowane skanowanie podbijające teksty niższej jakości (`.lrc`, `.txt`) lub brakujące do word-sync TTML z automatycznym pomijaniem istniejących `.ttml`.
+  - `prune` – bezpieczne narzędzie do wykrywania i usuwania osieroconych plików tekstów oraz przestarzałych duplikatów (domyślnie symulacja dry-run).
 
 ---
 
@@ -113,8 +116,19 @@ python -m src.main scan -d /sciezka/do/muzyki
 # 4. Testowe odpytanie dostawców dla pojedynczego utworu
 python -m src.main test-track -a "Queen" -t "Bohemian Rhapsody"
 
-# 5. Uruchomienie demona w tle z nasłuchiwaniem plików
+# 5. Uruchomienie ciągłego demona z obserwatorem systemu plików
 python -m src.main daemon -d /sciezka/do/muzyki -i 1h --with-watch
+
+# 6. Audyt biblioteki w trybie offline i eksport brakujących tekstów
+python -m src.main audit -d /sciezka/do/muzyki --show-missing
+python -m src.main audit -d /sciezka/do/muzyki --export-missing brakujace.csv
+
+# 7. Celowane uaktualnienie do word-sync TTML
+python -m src.main upgrade -d /sciezka/do/muzyki
+
+# 8. Czyszczenie osieroconych plików i duplikatów (domyślnie bezpieczna symulacja)
+python -m src.main prune -d /sciezka/do/muzyki
+python -m src.main prune -d /sciezka/do/muzyki --force
 ```
 
 ---
