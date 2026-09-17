@@ -13,7 +13,7 @@ from src.models import (
 )
 from src.normalizer import verify_track_match
 from src.providers.base import BaseLyricsProvider
-from src.storage import save_lyrics_sidecar, should_skip_track
+from src.storage import save_lyrics_for_track, save_lyrics_sidecar, should_skip_track
 
 logger = logging.getLogger("nla.matcher")
 
@@ -34,6 +34,7 @@ class LyricsMatcher:
             track.file_path,
             overwrite=self.config.overwrite,
             upgrade_quality=self.config.upgrade_quality,
+            storage_mode=getattr(self.config, "storage_mode", "sidecar"),
         )
         if skip:
             logger.debug(f"[SKIPPED] {track.display_name()} - {skip_reason}")
@@ -100,15 +101,24 @@ class LyricsMatcher:
 
         if best_match:
             lyrics, provider, score = best_match
-            target_path = save_lyrics_sidecar(
-                track.file_path,
-                lyrics,
+            target_path, was_embedded = save_lyrics_for_track(
+                audio_path=track.file_path,
+                lyrics=lyrics,
+                storage_mode=getattr(self.config, "storage_mode", "sidecar"),
+                output_dir=getattr(self.config, "output_dir", None),
                 dry_run=self.config.dry_run,
             )
 
+            dest_desc = []
+            if target_path:
+                dest_desc.append(target_path.name)
+            if was_embedded:
+                dest_desc.append("audio tags")
+            dest_str = " + ".join(dest_desc) if dest_desc else "tags"
+
             logger.info(
                 f"[FOUND] {track.display_name()} -> {lyrics.format.value.upper()} ({lyrics.sync_type.value}) "
-                f"via {provider.name} (score: {score:.2f}) -> {target_path.name}"
+                f"via {provider.name} (score: {score:.2f}) -> {dest_str}"
             )
 
             return ProcessResult(
@@ -117,6 +127,7 @@ class LyricsMatcher:
                 provider=provider.name,
                 format=lyrics.format,
                 target_file=target_path,
+                embedded=was_embedded,
                 match_score=score,
             )
 

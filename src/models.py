@@ -39,6 +39,13 @@ class LyricsSyncType(str, Enum):
     UNSYNCED = "unsynced"      # Plain text without timestamps
 
 
+class StorageMode(str, Enum):
+    """Storage destination for lyrics."""
+    SIDECAR = "sidecar"      # Only save companion sidecar files (.ttml, .lrc, .yaml)
+    EMBEDDED = "embedded"    # Only embed directly into audio tags (USLT, SYLT, LYRICS, ©lyr)
+    BOTH = "both"            # Both companion sidecar file AND audio tags
+
+
 def detect_sync_type(content: str, fmt: LyricsFormat, hint: Optional[str] = None) -> LyricsSyncType:
     """Accurately detect whether lyrics content has word-level sync, line-level sync, or is unsynced."""
     if not content or not content.strip():
@@ -102,9 +109,25 @@ class TrackMetadata(BaseModel):
     musicbrainz_trackid: Optional[str] = None
     clean_title: Optional[str] = None
     clean_artist: Optional[str] = None
+    has_embedded_lyrics: Optional[bool] = None
 
     def display_name(self) -> str:
         return f"{self.artist} - {self.title}"
+
+
+class SubsonicTrack(BaseModel):
+    """Song metadata entity retrieved from Navidrome / Subsonic API."""
+    id: str
+    title: str
+    artist: str
+    album: Optional[str] = None
+    duration: float = Field(default=0.0, description="Duration in seconds")
+    path: str = Field(default="", description="Relative path on server, e.g. Artist/Album/01 Track.mp3")
+    suffix: str = Field(default="mp3", description="File extension without dot")
+    lyrics_present: bool = Field(default=False, description="Whether server reports lyrics already exist")
+    year: Optional[int] = None
+    track_number: Optional[int] = None
+    disc_number: Optional[int] = None
 
 
 class LyricsResult(BaseModel):
@@ -148,5 +171,6 @@ class ProcessResult(BaseModel):
     provider: Optional[str] = None
     format: Optional[LyricsFormat] = None
     target_file: Optional[Path] = None
+    embedded: bool = False
     error_message: Optional[str] = None
     match_score: float = 0.0

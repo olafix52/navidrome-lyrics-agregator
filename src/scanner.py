@@ -10,7 +10,9 @@ from rich.table import Table
 from src.config import AppConfig
 from src.logger import console
 from src.matcher import LyricsMatcher
-from src.models import MatchStatus, ProcessResult
+from src.models import MatchStatus, ProcessResult, TrackMetadata
+from src.normalizer import clean_artist, clean_title
+from src.subsonic import SubsonicClient
 from src.tag_reader import is_supported_audio_file, read_track_metadata
 
 logger = logging.getLogger("nla.scanner")
@@ -86,7 +88,138 @@ class LibraryScanner:
             results = await asyncio.gather(*tasks)
 
         self.display_summary(results)
+
+        # Trigger Navidrome scan if new lyrics were downloaded
+        success_count = sum(1 for r in results if r.status == MatchStatus.SUCCESS)
+        await self._maybe_trigger_navidrome_scan(success_count)
+
         return results
+
+    async def process_metadata_batch(
+        self,
+        metadata_list: List[TrackMetadata],
+        show_progress: bool = True,
+    ) -> List[ProcessResult]:
+        """Process a list of TrackMetadata objects concurrently (e.g. from Subsonic API)."""
+        total_tracks = len(metadata_list)
+        if total_tracks == 0:
+            return []
+
+        results: List[ProcessResult] = []
+
+        if show_progress:
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("({task.completed}/{task.total})"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            )
+
+            with progress:
+                task_id = progress.add_task("[cyan]Processing Subsonic tracks...", total=total_tracks)
+
+                async def _worker(meta: TrackMetadata) -> ProcessResult:
+                    async with self.semaphore:
+                        res = await self.matcher.process_track(meta)
+                        progress.advance(task_id, 1)
+                        return res
+
+                tasks = [_worker(m) for m in metadata_list]
+                results = await asyncio.gather(*tasks)
+        else:
+            async def _worker_no_prog(meta: TrackMetadata) -> ProcessResult:
+                async with self.semaphore:
+                    return await self.matcher.process_track(meta)
+
+            tasks = [_worker_no_prog(m) for m in metadata_list]
+            results = await asyncio.gather(*tasks)
+
+        self.display_summary(results)
+
+        success_count = sum(1 for r in results if r.status == MatchStatus.SUCCESS)
+        await self._maybe_trigger_navidrome_scan(success_count)
+
+        return results
+
+    async def _maybe_trigger_navidrome_scan(self, success_count: int) -> None:
+        """Trigger library scan on Navidrome server if configured and new lyrics were saved."""
+        nd_cfg = getattr(self.config, "navidrome", None)
+        if not nd_cfg or not nd_cfg.url:
+            return
+
+        if not nd_cfg.auto_scan or success_count <= 0 or self.config.dry_run:
+            return
+
+        logger.info(f"Auto-triggering Navidrome library scan ({success_count} new lyrics downloaded)...")
+        try:
+            client = SubsonicClient(
+                base_url=nd_cfg.url,
+                username=nd_cfg.user or "",
+                password=nd_cfg.password or "",
+            )
+            try:
+                res = await client.start_scan(full_scan=nd_cfg.full_scan)
+                console.print(f"[bold green]✓ Navidrome scan triggered successfully:[/bold green] {res}")
+            finally:
+                await client.close()
+        except Exception as e:
+            logger.warning(f"Failed to auto-trigger Navidrome scan: {e}")
+
+    async def scan_subsonic_library(
+        self,
+        show_progress: bool = True,
+    ) -> List[ProcessResult]:
+        """Fetch track list from Navidrome via Subsonic API and download lyrics."""
+        nd_cfg = getattr(self.config, "navidrome", None)
+        if not nd_cfg or not nd_cfg.url:
+            raise ValueError("Navidrome URL is not configured. Specify --navidrome-url or NLA_NAVIDROME_URL.")
+
+        client = SubsonicClient(
+            base_url=nd_cfg.url,
+            username=nd_cfg.user or "",
+            password=nd_cfg.password or "",
+        )
+        try:
+            connected = await client.ping()
+            if not connected:
+                raise ConnectionError(f"Could not authenticate or connect to Subsonic server at {nd_cfg.url}")
+
+            sub_tracks = await client.get_all_tracks()
+            logger.info(f"Loaded {len(sub_tracks)} total tracks from Subsonic server")
+
+            metadata_list: List[TrackMetadata] = []
+            for st in sub_tracks:
+                if st.lyrics_present and not self.config.overwrite:
+                    continue
+
+                dest_base = self.config.output_dir if self.config.output_dir else self.config.music_dir
+                track_file = dest_base / st.path if st.path else dest_base / f"{st.artist} - {st.title}.{st.suffix}"
+
+                meta = TrackMetadata(
+                    file_path=track_file,
+                    title=st.title,
+                    artist=st.artist,
+                    album=st.album,
+                    duration=st.duration,
+                    track_number=st.track_number,
+                    disc_number=st.disc_number,
+                    clean_title=clean_title(st.title),
+                    clean_artist=clean_artist(st.artist),
+                )
+                metadata_list.append(meta)
+
+            logger.info(f"Tracks needing lyrics check: {len(metadata_list)}")
+            if not metadata_list:
+                console.print("[green]All tracks on Navidrome already have lyrics![/green]")
+                return []
+
+            return await self.process_metadata_batch(metadata_list, show_progress=show_progress)
+        finally:
+            await client.close()
 
     async def scan_and_process(
         self,

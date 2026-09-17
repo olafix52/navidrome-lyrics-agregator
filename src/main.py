@@ -22,16 +22,28 @@ from src.watcher import DirectoryWatcher
 
 async def run_scan_command(args: argparse.Namespace, config) -> None:
     """Execute one-time library scan."""
-    if args.force:
+    if getattr(args, "force", False):
         config.overwrite = True
-    if args.dry_run:
+    if getattr(args, "dry_run", False):
         config.dry_run = True
-    if args.allow_plain:
+    if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
-    if args.concurrency:
+    if getattr(args, "concurrency", None):
         config.concurrency = args.concurrency
-    if args.music_dir:
+    if getattr(args, "music_dir", None):
         config.music_dir = Path(args.music_dir)
+    if getattr(args, "storage_mode", None):
+        config.storage_mode = args.storage_mode
+    if getattr(args, "output_dir", None):
+        config.output_dir = Path(args.output_dir)
+    if getattr(args, "navidrome_url", None):
+        config.navidrome.url = args.navidrome_url
+    if getattr(args, "navidrome_user", None):
+        config.navidrome.user = args.navidrome_user
+    if getattr(args, "navidrome_password", None):
+        config.navidrome.password = args.navidrome_password
+    if getattr(args, "auto_scan", False):
+        config.navidrome.auto_scan = True
 
     target_str = getattr(args, "path", None) or getattr(args, "target", None) or getattr(args, "music_dir", None)
     target_path = Path(target_str) if target_str else config.music_dir
@@ -41,19 +53,78 @@ async def run_scan_command(args: argparse.Namespace, config) -> None:
     scanner = LibraryScanner(config, matcher)
 
     try:
-        await scanner.scan_and_process(target_path, show_progress=not args.no_progress)
+        if getattr(args, "subsonic", False):
+            console.print(f"[bold cyan]Scanning library via Navidrome Subsonic API:[/bold cyan] {config.navidrome.url}")
+            await scanner.scan_subsonic_library(show_progress=not getattr(args, "no_progress", False))
+        else:
+            await scanner.scan_and_process(target_path, show_progress=not getattr(args, "no_progress", False))
     finally:
         await matcher.close()
 
 
+async def run_trigger_scan_command(args: argparse.Namespace, config) -> None:
+    """Trigger library scan on the Navidrome server."""
+    from src.subsonic import SubsonicClient
+    url = getattr(args, "navidrome_url", None) or config.navidrome.url
+    user = getattr(args, "navidrome_user", None) or config.navidrome.user
+    pw = getattr(args, "navidrome_password", None) or config.navidrome.password
+    if not url:
+        console.print("[bold red]Error: Navidrome URL is not set. Use --navidrome-url or set NAVIDROME_URL in config/env.[/bold red]")
+        return
+
+    client = SubsonicClient(base_url=url, username=user or "", password=pw or "")
+    try:
+        res = await client.start_scan(full_scan=getattr(args, "full", False))
+        console.print(f"[bold green]✓ Successfully triggered Navidrome scan at {url}:[/bold green] {res}")
+    except Exception as e:
+        console.print(f"[bold red]✗ Failed to trigger Navidrome scan: {e}[/bold red]")
+    finally:
+        await client.close()
+
+
+async def run_ping_navidrome_command(args: argparse.Namespace, config) -> None:
+    """Test connection and authentication to Navidrome Subsonic API."""
+    from src.subsonic import SubsonicClient
+    url = getattr(args, "navidrome_url", None) or config.navidrome.url
+    user = getattr(args, "navidrome_user", None) or config.navidrome.user
+    pw = getattr(args, "navidrome_password", None) or config.navidrome.password
+    if not url:
+        console.print("[bold red]Error: Navidrome URL is not set. Use --navidrome-url or set NAVIDROME_URL in config/env.[/bold red]")
+        return
+
+    client = SubsonicClient(base_url=url, username=user or "", password=pw or "")
+    try:
+        ok = await client.ping()
+        if ok:
+            console.print(f"[bold green]✓ Successfully connected and authenticated with Navidrome at {url}[/bold green]")
+        else:
+            console.print(f"[bold red]✗ Failed to connect/authenticate with Navidrome at {url}[/bold red]")
+    except Exception as e:
+        console.print(f"[bold red]✗ Error connecting to Navidrome: {e}[/bold red]")
+    finally:
+        await client.close()
+
+
 async def run_daemon_command(args: argparse.Namespace, config) -> None:
     """Execute continuous daemon mode with scheduled scans and optional watcher."""
-    if args.music_dir:
+    if getattr(args, "music_dir", None):
         config.music_dir = Path(args.music_dir)
-    if args.interval:
+    if getattr(args, "interval", None):
         config.scan_interval = args.interval
-    if args.allow_plain:
+    if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
+    if getattr(args, "storage_mode", None):
+        config.storage_mode = args.storage_mode
+    if getattr(args, "output_dir", None):
+        config.output_dir = Path(args.output_dir)
+    if getattr(args, "navidrome_url", None):
+        config.navidrome.url = args.navidrome_url
+    if getattr(args, "navidrome_user", None):
+        config.navidrome.user = args.navidrome_user
+    if getattr(args, "navidrome_password", None):
+        config.navidrome.password = args.navidrome_password
+    if getattr(args, "auto_scan", False):
+        config.navidrome.auto_scan = True
 
     providers = build_provider_cascade(config)
     matcher = LyricsMatcher(config, providers)
@@ -175,16 +246,22 @@ async def run_audit_command(args: argparse.Namespace, config) -> None:
 
 async def run_upgrade_command(args: argparse.Namespace, config) -> None:
     """Scan and upgrade tracks with missing or lower-quality lyrics (to TTML word-sync)."""
-    if args.force:
+    if getattr(args, "force", False):
         config.overwrite = True
-    if args.dry_run:
+    if getattr(args, "dry_run", False):
         config.dry_run = True
-    if args.allow_plain:
+    if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
-    if args.concurrency:
+    if getattr(args, "concurrency", None):
         config.concurrency = args.concurrency
-    if args.music_dir:
+    if getattr(args, "music_dir", None):
         config.music_dir = Path(args.music_dir)
+    if getattr(args, "storage_mode", None):
+        config.storage_mode = args.storage_mode
+    if getattr(args, "output_dir", None):
+        config.output_dir = Path(args.output_dir)
+    if getattr(args, "auto_scan", False):
+        config.navidrome.auto_scan = True
 
     target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
     target_path = Path(target_str) if target_str else config.music_dir
@@ -314,6 +391,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     scan_p.add_argument("--concurrency", type=int, help="Number of concurrent download tasks")
     scan_p.add_argument("--no-progress", action="store_true", help="Disable rich progress bar")
+    scan_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar (default), embedded (tags), or both")
+    scan_p.add_argument("--output-dir", type=str, help="Custom output directory for saved sidecars")
+    scan_p.add_argument("--subsonic", action="store_true", help="Fetch tracks from Navidrome Subsonic API instead of scanning local disk")
+    scan_p.add_argument("--navidrome-url", type=str, help="Navidrome server URL (e.g. http://localhost:4533)")
+    scan_p.add_argument("--navidrome-user", type=str, help="Navidrome username")
+    scan_p.add_argument("--navidrome-password", type=str, help="Navidrome password")
+    scan_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
 
     # DAEMON subcommand
     daemon_p = subparsers.add_parser("daemon", help="Run in daemon mode with periodic scans")
@@ -321,11 +405,18 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument("-i", "--interval", type=str, help="Scan interval (e.g. '1h', '30m', '3600')")
     daemon_p.add_argument("-w", "--with-watch", action="store_true", help="Enable real-time watchdog along with periodic scans")
     daemon_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
+    daemon_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
+    daemon_p.add_argument("--output-dir", type=str, help="Custom output directory for saved sidecars")
+    daemon_p.add_argument("--navidrome-url", type=str, help="Navidrome server URL")
+    daemon_p.add_argument("--navidrome-user", type=str, help="Navidrome username")
+    daemon_p.add_argument("--navidrome-password", type=str, help="Navidrome password")
+    daemon_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
 
     # WATCH subcommand
     watch_p = subparsers.add_parser("watch", help="Watch music directory and fetch lyrics on file events")
     watch_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     watch_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
+    watch_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
 
     # TEST-TRACK subcommand
     test_p = subparsers.add_parser("test-track", help="Test query against all providers for a single track")
@@ -361,6 +452,9 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     upgrade_p.add_argument("--concurrency", type=int, help="Number of concurrent download tasks")
     upgrade_p.add_argument("--no-progress", action="store_true", help="Disable rich progress bar")
+    upgrade_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
+    upgrade_p.add_argument("--output-dir", type=str, help="Custom output directory for saved sidecars")
+    upgrade_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after upgrading lyrics")
 
     # PRUNE subcommand
     prune_p = subparsers.add_parser("prune", help="Clean up orphaned sidecars and obsolete duplicate formats")
@@ -370,6 +464,19 @@ def build_parser() -> argparse.ArgumentParser:
     prune_p.add_argument("-f", "--force", action="store_true", help="Perform actual deletion of files")
     prune_p.add_argument("--orphans-only", action="store_true", help="Only delete orphaned sidecars without audio")
     prune_p.add_argument("--duplicates-only", action="store_true", help="Only delete duplicate lower-quality sidecars")
+
+    # TRIGGER-SCAN subcommand
+    trigger_p = subparsers.add_parser("trigger-scan", help="Trigger a library scan on the Navidrome server")
+    trigger_p.add_argument("--full", action="store_true", help="Request full rescan instead of quick scan")
+    trigger_p.add_argument("--navidrome-url", type=str, help="Navidrome server URL")
+    trigger_p.add_argument("--navidrome-user", type=str, help="Navidrome username")
+    trigger_p.add_argument("--navidrome-password", type=str, help="Navidrome password")
+
+    # PING-NAVIDROME subcommand
+    ping_p = subparsers.add_parser("ping-navidrome", help="Test connection and authentication to Navidrome Subsonic API")
+    ping_p.add_argument("--navidrome-url", type=str, help="Navidrome server URL")
+    ping_p.add_argument("--navidrome-user", type=str, help="Navidrome username")
+    ping_p.add_argument("--navidrome-password", type=str, help="Navidrome password")
 
     # WEB / DASHBOARD subcommand
     for cmd_name in ["web", "dashboard"]:
@@ -444,6 +551,10 @@ def main() -> None:
             await run_prune_command(args, config)
         elif command in ("web", "dashboard"):
             await run_web_command(args, config)
+        elif command == "trigger-scan":
+            await run_trigger_scan_command(args, config)
+        elif command == "ping-navidrome":
+            await run_ping_navidrome_command(args, config)
         else:
             parser.print_help()
 

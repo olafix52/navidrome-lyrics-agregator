@@ -45,21 +45,41 @@ class ProviderConfig(BaseModel):
     extra: Dict[str, Any] = Field(default_factory=dict)
 
 
+class NavidromeConfig(BaseModel):
+    """Navidrome / Subsonic server connection configuration."""
+    url: Optional[str] = Field(default=None, description="Navidrome server URL, e.g. http://localhost:4533")
+    user: Optional[str] = Field(default=None, description="Navidrome / Subsonic username")
+    password: Optional[str] = Field(default=None, description="Navidrome / Subsonic password")
+    auto_scan: bool = Field(default=False, description="Automatically trigger Navidrome scan after lyrics update")
+    full_scan: bool = Field(default=False, description="Trigger full library scan in Navidrome instead of fast scan")
+
+
 class AppConfig(BaseModel):
     """Main application configuration."""
 
     # General Settings
     music_dir: Path = Field(default=Path("/music"), description="Root directory of audio files")
+    output_dir: Optional[Path] = Field(default=None, description="Optional custom destination directory for saved sidecars")
     scan_interval: str = Field(default="1h", description="Periodic scan interval for daemon mode (e.g. 1h, 30m, 3600s)")
     watch_debounce_seconds: float = Field(default=3.0, description="Debounce delay for filesystem watcher events")
     duration_tolerance_seconds: float = Field(default=2.5, description="Allowed deviation in song duration")
     min_similarity_score: float = Field(default=0.75, description="Minimum string similarity for fuzzy matching")
     
     # Operation modes
-    overwrite: bool = Field(default=False, description="Force overwrite existing lyrics sidecar files")
+    storage_mode: str = Field(
+        default="sidecar",
+        description="Lyrics storage destination: 'sidecar' (companion files), 'embedded' (audio tags), or 'both'",
+    )
+    overwrite: bool = Field(default=False, description="Force overwrite existing lyrics sidecar files or tags")
     upgrade_quality: bool = Field(default=True, description="Upgrade from LRC to TTML/YAML if higher quality is found")
     dry_run: bool = Field(default=False, description="Scan and search without writing files to disk")
     allow_plain_lyrics: bool = Field(default=False, description="Allow falling back to unsynced plain lyrics if no synced found")
+
+    # Navidrome server integration
+    navidrome: NavidromeConfig = Field(
+        default_factory=NavidromeConfig,
+        description="Navidrome / Subsonic server integration settings",
+    )
 
     # Concurrency and Network
     concurrency: int = Field(default=4, description="Maximum concurrent track processing tasks")
@@ -140,6 +160,10 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "NLA_MAX_RETRIES": ("max_retries", int),
         "NLA_LOG_LEVEL": "log_level",
         "NLA_LOG_FILE": "log_file",
+        "NLA_STORAGE_MODE": "storage_mode",
+        "STORAGE_MODE": "storage_mode",
+        "NLA_OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
+        "OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
     }
 
     for env_var, target in env_mapping.items():
@@ -153,6 +177,28 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
                     pass
             else:
                 data[target] = val
+
+    # Navidrome env settings
+    navidrome_data = data.setdefault("navidrome", {})
+    if not isinstance(navidrome_data, dict):
+        navidrome_data = {}
+        data["navidrome"] = navidrome_data
+
+    nd_url = os.environ.get("NLA_NAVIDROME_URL") or os.environ.get("NAVIDROME_URL")
+    if nd_url:
+        navidrome_data["url"] = nd_url
+    nd_user = os.environ.get("NLA_NAVIDROME_USER") or os.environ.get("NAVIDROME_USER")
+    if nd_user:
+        navidrome_data["user"] = nd_user
+    nd_pass = os.environ.get("NLA_NAVIDROME_PASSWORD") or os.environ.get("NAVIDROME_PASSWORD")
+    if nd_pass:
+        navidrome_data["password"] = nd_pass
+    nd_auto = os.environ.get("NLA_NAVIDROME_AUTO_SCAN") or os.environ.get("NAVIDROME_AUTO_SCAN")
+    if nd_auto:
+        navidrome_data["auto_scan"] = nd_auto.lower() in ("true", "1", "yes")
+    nd_full = os.environ.get("NLA_NAVIDROME_FULL_SCAN") or os.environ.get("NAVIDROME_FULL_SCAN")
+    if nd_full:
+        navidrome_data["full_scan"] = nd_full.lower() in ("true", "1", "yes")
 
     # Providers list from env (comma separated)
     if "NLA_ENABLED_PROVIDERS" in os.environ:

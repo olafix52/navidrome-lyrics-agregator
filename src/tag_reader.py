@@ -13,6 +13,7 @@ from mutagen.oggvorbis import OggVorbis
 
 from src.models import TrackMetadata
 from src.normalizer import clean_artist, clean_title
+from src.tag_writer import has_embedded_lyrics
 
 logger = logging.getLogger("nla.tag_reader")
 
@@ -120,6 +121,7 @@ def read_track_metadata(file_path: Path) -> Optional[TrackMetadata]:
 
         clean_t = clean_title(title)
         clean_a = clean_artist(artist)
+        embedded_lyrics = has_embedded_lyrics(file_path)
 
         return TrackMetadata(
             file_path=file_path,
@@ -132,6 +134,7 @@ def read_track_metadata(file_path: Path) -> Optional[TrackMetadata]:
             musicbrainz_trackid=mb_trackid,
             clean_title=clean_t,
             clean_artist=clean_a,
+            has_embedded_lyrics=embedded_lyrics,
         )
 
     except Exception as e:
