@@ -5,7 +5,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Docker Support](https://img.shields.io/badge/docker-ready-blue?logo=docker)](https://www.docker.com/)
 
-> **Automatyczny, asynchroniczny demon sidecar dla serwera muzycznego [Navidrome](https://www.navidrome.org/) pobierający zsynchronizowane teksty piosenek w najwyższej możliwej jakości (TTML słowo-po-słowie, Lyricsfile YAML oraz zsynchronizowany LRC).**
+> **Wysokowydajny, asynchroniczny agregator i demon tekstów piosenek dla serwera muzycznego [Navidrome](https://www.navidrome.org/). Pobiera zsynchronizowane teksty w najwyższej jakości (TTML sylaba-po-sylabie, Lyricsfile YAML oraz zsynchronizowany LRC), osadza je bezpośrednio w tagach audio i automatycznie wyzwala skanowanie w Navidrome.**
 
 *Dostępne wersje językowe: [English](README.md) | [Polski](README.pl.md)*
 
@@ -28,32 +28,43 @@
   12. `lyricsify` – Baza Lyricsify (wsparcie FlareSolverr).
   13. `genius` – Genius API + HTML Scraper (opcjonalny niesynchroniczny fallback).
 
-- **Inteligentny Matching Engine:**
-  - Odczyt metadanych przez `mutagen` (`.flac`, `.mp3`, `.m4a`, `.opus`, `.ogg`, `.wav`, `.aiff`, etc.).
-  - Zaawansowana normalizacja tytułów (usuwanie `(Remastered)`, `[Official Audio]`, `feat.`, `(Live)`).
-  - Weryfikacja zgodności czasu trwania (domyślna tolerancja $\pm 2.5$ s).
-  - Weryfikacja podobieństwa tekstu i wykonawcy (Fuzzy String Similarity $\ge 0.75$).
+- **Elastyczne przechowywanie i zapis w tagach audio (Embedded Lyrics):**
+  - **Pliki sidecar:** Atomowy zapis plików towarzyszących (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) z hierarchią jakości (`.ttml` > `.yaml` > `.lrc`).
+  - **Osadzanie w tagach audio:** Bezpieczny, bezstratny zapis metadanych przez `mutagen`:
+    - **MP3 (ID3v2.4):** Ramki `USLT` (tekst zsynchronizowany/zwykły dla Symfonium, Poweramp, foobar2000), `SYLT` (milisekundowa synchronizacja karaoke) oraz `TXXX:LYRICS`.
+    - **FLAC, OGG, Opus:** Komentarze Vorbis `LYRICS` oraz `UNSYNCEDLYRICS`.
+    - **M4A / MP4 / ALAC:** Atom QuickTime/Apple `©lyr` (`\xa9lyr`).
+  - **Wybór trybu (`--storage-mode`):** `sidecar` (domyślny), `embedded` (wyłącznie tagi) lub `both` (jednocześnie pliki sidecar i tagi).
+  - **Katalog wyjściowy (`--output-dir`):** Zapisywanie plików tekstów w wyodrębnionym folderze poza katalogiem muzyki.
 
-- **Zarządzanie plikami Sidecar:**
-  - Sprawdzanie istniejących plików obok audio: `utwór.ttml` > `utwór.yaml` > `utwór.lrc`.
-  - Atomowy zapis (ochrona przed uszkodzeniem plików przy przerwaniu).
-  - Opcja automatycznego podbijania jakości (np. zamiana `.lrc` na `.ttml` jeśli znaleziono wersję sylabową).
+- **Integracja z Navidrome / Subsonic API:**
+  - **Wyzwalanie skanera (`--auto-scan`):** Automatyczne wysyłanie żądania `/rest/startScan.view` do Navidrome natychmiast po pobraniu nowych tekstów, dzięki czemu pojawiają się one w odtwarzaczach (Feishin, Symfonium) od razu.
+  - **Zdalne wykrywanie utworów (`--subsonic`):** Pobieranie listy utworów bezpośrednio przez API sieciowe, bez konieczności lokalnego montowania wolumenu `/music`.
+  - **Polecenia CLI:** `trigger-scan` (ręczne wywołanie skanu w Navidrome) oraz `ping-navidrome` (test połączenia i danych logowania).
 
-- **Tryby działania i narzędzia biblioteczne:**
-  - `scan` – jednorazowe przeskanowanie biblioteki z estetycznym paskiem postępu i podsumowaniem tabelarycznym.
-  - `daemon` – cykliczne skanowanie w tle (np. co 1 godzinę).
-  - `watch` – monitorowanie zmian na systemie plików w czasie rzeczywistym (`watchdog` z debouncingiem).
-  - `test-track` – szybkie testowanie odpytywania dostawców dla pojedynczego utworu bezpośrednio z konsoli.
-  - `audit` (lub `stats`) – szybki audyt biblioteki offline (podsumowanie pokrycia word-sync TTML/YAML, line-sync LRC, unsynced, missing) z tabelami Rich i eksportem do JSON/CSV.
-  - `upgrade` – celowane skanowanie podbijające teksty niższej jakości (`.lrc`, `.txt`) lub brakujące do word-sync TTML z automatycznym pomijaniem istniejących `.ttml`.
-  - `prune` – bezpieczne narzędzie do wykrywania i usuwania osieroconych plików tekstów oraz przestarzałych duplikatów (domyślnie symulacja dry-run).
-  - `web` (lub `dashboard`) – lekki panel Web UI z wykresem pokrycia biblioteki, odtwarzaczem karaoke na żywo oraz ręczną wyszukiwarką i selektorem alternatywnych wersji tekstów.
+- **Inteligentny silnik dopasowywania:**
+  - Odczyt metadanych audio za pomocą `mutagen` (`.flac`, `.mp3`, `.m4a`, `.opus`, `.ogg`, `.wav`, `.aiff`, itp.).
+  - Zaawansowane oczyszczanie tytułów (usuwanie `(Remastered)`, `[Official Audio]`, `feat.`, `(Live)`).
+  - Zabezpieczenie przed błędnym dopasowaniem czasu utworu (domyślna tolerancja $\pm 2.5$ s).
+  - Weryfikacja podobieństwa nazw i wykonawców (Fuzzy String Similarity $\ge 0.75$).
+
+- **Tryby działania i narzędzia:**
+  - `scan` – Szybkie skanowanie biblioteki z paskiem postępu, kontrolą współbieżności i tabelą podsumowania.
+  - `daemon` – Usługa w tle z harmonogramem skanowania (np. co godzinę).
+  - `watch` – Monitorowanie zmian w systemie plików w czasie rzeczywistym (`watchdog`).
+  - `test-track` – Błyskawiczne sprawdzenie wyników u wszystkich dostawców dla jednego utworu z poziomu konsoli.
+  - `audit` (lub `stats`) – Audyt offline raportujący stan biblioteki z eksportem do JSON/CSV.
+  - `upgrade` – Pobieranie tekstów word-sync tylko dla utworów, które ich nie posiadają (pomija `.ttml`).
+  - `prune` – Usuwanie osieroconych plików tekstów i przestarzałych duplikatów o niższej jakości.
+  - `web` (lub `dashboard`) – Minimalistyczny panel Web UI z odtwarzaczem karaoke (renderer ToxiPlays TTML).
+  - `trigger-scan` – Wywołanie skanowania biblioteki na serwerze Navidrome.
+  - `ping-navidrome` – Sprawdzenie połączenia z API Navidrome.
 
 ---
 
 ## 🚀 Szybki start z Docker Compose
 
-Najwygodniejszym sposobem uruchomienia jest spięcie kontenera w jednym stosie z Navidrome:
+Zalecanym sposobem uruchomienia jest spięcie agregatora w jednym stosie z Navidrome:
 
 ```yaml
 services:
@@ -78,7 +89,12 @@ services:
       - MUSIC_DIR=/music
       - NLA_SCAN_INTERVAL=1h
       - NLA_LOG_LEVEL=INFO
-      - NLA_CONCURRENCY=4
+      - NLA_CONCURRENCY=16
+      - NLA_STORAGE_MODE=both
+      - NLA_NAVIDROME_URL=http://navidrome:4533
+      - NLA_NAVIDROME_USER=admin
+      - NLA_NAVIDROME_PASSWORD=twoje_haslo
+      - NLA_NAVIDROME_AUTO_SCAN=true
     volumes:
       - ./music:/music:rw
       - ./config.yaml:/config/config.yaml:ro
@@ -97,11 +113,11 @@ docker compose up -d --build
 ## 🛠️ Uruchomienie lokalne (bez Dockera)
 
 ### Wymagania:
-- Python 3.11+
-- Zarządca pakietów `pip`
+- Python 3.11 lub nowszy
+- Menedżer pakietów `pip`
 
 ```bash
-# 1. Klonowanie i instalacja zależności
+# 1. Klonowanie repozytorium i instalacja zależności
 git clone https://github.com/olafix52/navidrome-lyrics-agregator.git
 cd navidrome-lyrics-agregator
 python3 -m venv .venv
@@ -111,48 +127,87 @@ pip install -r requirements.txt
 # 2. Konfiguracja lokalna (opcjonalnie)
 cp config.example.yaml config.local.yaml
 
-# 3. Jednorazowe przeskanowanie folderu z muzyką
-python -m src.main scan -d /sciezka/do/muzyki
+# 3. Jednorazowy skan biblioteki (domyślnie pliki sidecar)
+python -m src.main scan -d /ścieżka/do/muzyki
 
-# 4. Testowe odpytanie dostawców dla pojedynczego utworu
+# 4. Szybki skan z zapisem do tagów audio i auto-skanem Navidrome
+python -m src.main scan -d /ścieżka/do/muzyki --storage-mode both --auto-scan --concurrency 16
+
+# 5. Zdalny skan przez API Subsonic Navidrome (bez montowania dysku z muzyką)
+python -m src.main scan --subsonic --output-dir /ścieżka/do/tekstów --navidrome-url http://localhost:4533 -u admin -p tajne
+
+# 6. Sprawdzenie wyszukiwania tekstu dla pojedynczego utworu
 python -m src.main test-track -a "Queen" -t "Bohemian Rhapsody"
 
-# 5. Uruchomienie ciągłego demona z obserwatorem systemu plików
-python -m src.main daemon -d /sciezka/do/muzyki -i 1h --with-watch
+# 7. Uruchomienie demona w tle z nasłuchiwaniem nowych plików
+python -m src.main daemon -d /ścieżka/do/muzyki -i 1h --with-watch
 
-# 6. Audyt biblioteki w trybie offline i eksport brakujących tekstów
-python -m src.main audit -d /sciezka/do/muzyki --show-missing
-python -m src.main audit -d /sciezka/do/muzyki --export-missing brakujace.csv
+# 8. Audyt biblioteki offline i eksport brakujących tekstów
+python -m src.main audit -d /ścieżka/do/muzyki --show-missing
+python -m src.main audit -d /ścieżka/do/muzyki --export-missing missing.csv
 
-# 7. Celowane uaktualnienie do word-sync TTML
-python -m src.main upgrade -d /sciezka/do/muzyki
+# 9. Podbicie jakości istniejących tekstów do TTML
+python -m src.main upgrade -d /ścieżka/do/muzyki
 
-# 8. Czyszczenie osieroconych plików i duplikatów (domyślnie bezpieczna symulacja)
-python -m src.main prune -d /sciezka/do/muzyki
-python -m src.main prune -d /sciezka/do/muzyki --force
+# 10. Czyszczenie osieroconych plików i przestarzałych duplikatów (domyślnie dry-run)
+python -m src.main prune -d /ścieżka/do/muzyki
+python -m src.main prune -d /ścieżka/do/muzyki --force
 
-# 9. Uruchomienie lekkiego panelu Web UI i odtwarzacza karaoke
-python -m src.main web -p 8080 -d /sciezka/do/muzyki
+# 11. Wywołanie skanu biblioteki w Navidrome lub test połączenia
+python -m src.main ping-navidrome
+python -m src.main trigger-scan
+
+# 12. Uruchomienie minimalistycznego panelu Web UI i odtwarzacza karaoke
+python -m src.main web -p 8080 -d /ścieżka/do/muzyki
 ```
+
+---
+
+## ⚡ Maksymalizacja prędkości skanowania
+
+Aby przeskanować dużą bibliotekę muzyczną w najkrótszym czasie:
+- **Zwiększ współbieżność (`--concurrency`):** Ustaw `--concurrency 16` lub `24`, aby asynchronicznie przetwarzać wiele utworów naraz.
+- **Pomiń utwory posiadające już jakikolwiek tekst (`NLA_UPGRADE_QUALITY=false`):** Domyślnie agregator odpytuje serwery w poszukiwaniu TTML, nawet jeśli istnieje `.lrc`. Wyłączenie tej opcji sprawi, że utwory z tekstem zostaną pominięte w ułamku milisekundy:
+  ```bash
+  NLA_UPGRADE_QUALITY=false python -m src.main scan -d /ścieżka/do/muzyki --concurrency 24
+  ```
+- **Wybierz najszybszych dostawców:**
+  ```bash
+  NLA_ENABLED_PROVIDERS="amll,lrclib,netease,kugou" python -m src.main scan -d /ścieżka/do/muzyki --concurrency 20
+  ```
 
 ---
 
 ## ⚙️ Konfiguracja (`config.yaml` / `config.local.yaml`)
 
-Plik `config.yaml` (lub `config.example.yaml`) pozwala na pełne dostosowanie zachowania:
+Plik `config.yaml` pozwala precyzyjnie dostosować działanie aplikacji:
 
 ```yaml
+# Ustawienia ogólne
 music_dir: "/music"
 scan_interval: "1h"
 watch_debounce_seconds: 3.0
 duration_tolerance_seconds: 2.5
 min_similarity_score: 0.75
+
+# Ustawienia zapisu tekstów
+storage_mode: "both"     # "sidecar", "embedded" lub "both"
+output_dir: null         # Opcjonalny dedykowany folder na pliki tekstów
 overwrite: false
 upgrade_quality: true
 dry_run: false
 allow_plain_lyrics: false
-concurrency: 4
+concurrency: 16
 
+# Połączenie z serwerem Navidrome
+navidrome:
+  url: "http://localhost:4533"
+  user: "admin"
+  password: "twoje_haslo"
+  auto_scan: true        # Automatyczne wyzwalanie skanera po zapisaniu nowych tekstów
+  full_scan: false
+
+# Aktywni dostawcy (kolejność określa priorytet)
 enabled_providers:
   - "amll"
   - "apple_music"
@@ -169,35 +224,42 @@ enabled_providers:
   - "genius"
 ```
 
-Każdą opcję można również skonfigurować za pomocą zmiennych środowiskowych z prefiksem `NLA_` (zobacz [.env.example](.env.example)):
-- `MUSIC_DIR` lub `NLA_MUSIC_DIR` – katalog z muzyką
-- `NLA_SCAN_INTERVAL` – interwał skanowania (np. `1h`, `30m`)
-- `NLA_CONCURRENCY` – liczba współbieżnych zapytań (np. `4`)
-- `NLA_OVERWRITE` – nadpisywanie istniejących tekstów (`true`/`false`)
-- `NLA_UPGRADE_QUALITY` – podbijanie jakości do TTML (`true`/`false`)
-- `NLA_LOG_LEVEL` – poziom logowania (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
+Wszystkie opcje można również przekazać za pomocą zmiennych środowiskowych z przedrostkiem `NLA_`:
+- `MUSIC_DIR` lub `NLA_MUSIC_DIR` – Ścieżka do katalogu z muzyką
+- `NLA_STORAGE_MODE` – Tryb zapisu: `sidecar`, `embedded` lub `both`
+- `NLA_OUTPUT_DIR` – Dedykowany folder na pliki tekstów
+- `NLA_SCAN_INTERVAL` – Częstotliwość skanowania w trybie demona (`1h`, `30m`, `3600s`)
+- `NLA_CONCURRENCY` – Liczba współbieżnych zadań (domyślnie: `4`)
+- `NLA_OVERWRITE` – Nadpisywanie istniejących tekstów (`true`/`false`)
+- `NLA_UPGRADE_QUALITY` – Podbijanie jakości tekstów do TTML (`true`/`false`)
+- `NLA_NAVIDROME_URL` – Adres URL serwera Navidrome
+- `NLA_NAVIDROME_USER` – Nazwa użytkownika Navidrome
+- `NLA_NAVIDROME_PASSWORD` – Hasło Navidrome
+- `NLA_NAVIDROME_AUTO_SCAN` – Automatyczne wyzwalanie skanu w Navidrome (`true`/`false`)
+- `NLA_LOG_LEVEL` – Poziom szczegółowości logów (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
 > [!TIP]
-> Jeśli posiadasz własne klucze API (np. token deweloperski Apple Music lub token Genius), umieść je w pliku `config.local.yaml`. Plik ten jest automatycznie ignorowany przez Git i nie zostanie przypadkowo opublikowany.
+> Jeśli posiadasz własne hasła, tokeny API lub niestandardowe ścieżki, umieść je w `config.local.yaml`. Plik ten jest automatycznie ignorowany przez Git i nie trafi do repozytorium.
 
 ---
 
 ## 🧪 Testy jednostkowe
 
-Projekt posiada zestaw testów jednostkowych pokrywających parsowanie formatów TTML, LRC, Lyricsfile YAML, normalizację metadanych oraz logikę wszystkich providerów:
+Uruchomienie pełnego pakietu testów:
 
 ```bash
 pytest
 ```
+*88 testów jednostkowych (100% testów zdanych).*
 
 ---
 
-## 🤝 Wkład w rozwój (Contributing)
+## 🤝 Wkład w projekt
 
-Chcesz pomóc w rozwoju projektu, dodać nowego dostawcę tekstów lub zgłosić błąd? Zapoznaj się z [CONTRIBUTING.md](CONTRIBUTING.md).
+Propozycje zmian, zgłoszenia błędów oraz pull requesty są mile widziane! Przed utworzeniem PR warto zapoznać się z [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 ## 📄 Licencja
 
-Projekt udostępniany jest na licencji [MIT](LICENSE).
+Projekt jest udostępniony na warunkach licencji [MIT](LICENSE).
