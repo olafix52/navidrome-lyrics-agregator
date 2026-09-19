@@ -211,29 +211,63 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         data.setdefault("providers", {}).setdefault("lyricsify", {}).setdefault("extra", {})["flaresolverr_url"] = fs_url
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep merge override dict into base dict. Override values take precedence."""
+    merged = base.copy()
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(config_path: Optional[Path] = None) -> AppConfig:
-    """Load configuration from YAML file and override with environment variables."""
+    """Load configuration from YAML file and override with environment variables.
+    
+    If config.local.yaml exists, it is deep-merged on top of config.yaml,
+    so users only need to specify overrides in the local file.
+    """
     data: Dict[str, Any] = {}
 
-    candidates = [
-        Path(config_path) if config_path else None,
-        Path(os.environ.get("NLA_CONFIG", "")) if os.environ.get("NLA_CONFIG") else None,
-        Path("/config/config.yaml"),
-        Path("./config.local.yaml"),
-        Path("./config.yaml"),
-        Path("./config/config.yaml"),
-    ]
+    # If explicit path provided or via env var, use it directly
+    explicit = config_path or (Path(os.environ["NLA_CONFIG"]) if os.environ.get("NLA_CONFIG") else None)
+    if explicit and explicit.is_file():
+        try:
+            with open(explicit, "r", encoding="utf-8") as f:
+                content = yaml.safe_load(f)
+                if isinstance(content, dict):
+                    data = content
+        except Exception as e:
+            print(f"Warning: Failed to load config from {explicit}: {e}")
+    else:
+        # Load base config.yaml
+        base_candidates = [
+            Path("/config/config.yaml"),
+            Path("./config.yaml"),
+            Path("./config/config.yaml"),
+        ]
+        for candidate in base_candidates:
+            if candidate.is_file():
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        content = yaml.safe_load(f)
+                        if isinstance(content, dict):
+                            data = content
+                            break
+                except Exception as e:
+                    print(f"Warning: Failed to load config from {candidate}: {e}")
 
-    for candidate in candidates:
-        if candidate and candidate.is_file():
+        # Merge config.local.yaml on top if it exists
+        local_path = Path("./config.local.yaml")
+        if local_path.is_file():
             try:
-                with open(candidate, "r", encoding="utf-8") as f:
-                    content = yaml.safe_load(f)
-                    if isinstance(content, dict):
-                        data = content
-                        break
+                with open(local_path, "r", encoding="utf-8") as f:
+                    local_content = yaml.safe_load(f)
+                    if isinstance(local_content, dict):
+                        data = _deep_merge(data, local_content)
             except Exception as e:
-                print(f"Warning: Failed to load config from {candidate}: {e}")
+                print(f"Warning: Failed to load local config from {local_path}: {e}")
 
     _apply_env_overrides(data)
     return AppConfig(**data)

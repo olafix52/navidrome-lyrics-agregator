@@ -1,13 +1,13 @@
 """Kuwo Music Lyrics Provider."""
 
+import ast
 import base64
 import html
 import json
 import logging
-import re
 import zlib
 from typing import Any, Dict, List, Optional
-from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata, detect_sync_type
+from src.models import LyricsFormat, LyricsResult, TrackMetadata, detect_sync_type
 from src.normalizer import calculate_candidate_score, clean_artist, clean_title
 from src.providers.base import BaseLyricsProvider
 
@@ -99,7 +99,6 @@ class KuwoProvider(BaseLyricsProvider):
         # Kuwo search API returns Python-style dict literal with single quotes.
         # Using ast.literal_eval handles apostrophes in values correctly,
         # unlike the naive replace("'", '"') which corrupts names like "Don't Stop".
-        import ast
         try:
             try:
                 data = ast.literal_eval(resp.text)
@@ -173,6 +172,7 @@ class KuwoProvider(BaseLyricsProvider):
                     provider_name=self.name,
                     title=candidate_title,
                     artist=candidate_artist,
+                    match_score=score,
                     metadata={"music_rid": music_rid, "match_score": score},
                 )
 

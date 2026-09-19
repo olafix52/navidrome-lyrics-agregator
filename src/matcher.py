@@ -35,6 +35,7 @@ class LyricsMatcher:
             overwrite=self.config.overwrite,
             upgrade_quality=self.config.upgrade_quality,
             storage_mode=getattr(self.config, "storage_mode", "sidecar"),
+            output_dir=self.config.output_dir,
         )
         if skip:
             logger.debug(f"[SKIPPED] {track.display_name()} - {skip_reason}")

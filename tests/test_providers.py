@@ -1,8 +1,7 @@
 """Unit tests for all 9 lyrics providers with mocked HTTP requests."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
-import httpx
+from unittest.mock import MagicMock, patch
 import pytest
 from src.config import ProviderConfig
 from src.models import LyricsFormat, LyricsSyncType, TrackMetadata
@@ -901,6 +900,11 @@ def test_ttml_builder_and_timestamps():
     assert format_ttml_timestamp(-5.0) == "00:00.000"
     assert format_ttml_timestamp(0.0) == "00:00.000"
     assert format_ttml_timestamp(65.432) == "01:05.432"
+    # Regression: minute boundary rounding must not produce 00:60.000
+    assert format_ttml_timestamp(60.0) == "01:00.000"
+    result_boundary = format_ttml_timestamp(59.9997)
+    assert ":60" not in result_boundary, f"Got invalid timestamp: {result_boundary}"
+    assert result_boundary == "01:00.000"
 
     lines = [
         {

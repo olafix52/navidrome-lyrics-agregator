@@ -1,7 +1,6 @@
 """Unit tests for the lyrics matcher and cascade orchestration."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
 import pytest
 from src.config import AppConfig
 from src.matcher import LyricsMatcher

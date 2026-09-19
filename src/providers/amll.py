@@ -5,11 +5,10 @@ from typing import Any, Dict, List, Optional
 from src.models import (
     LyricsFormat,
     LyricsResult,
-    LyricsSyncType,
     TrackMetadata,
     detect_sync_type,
 )
-from src.normalizer import calculate_candidate_score, calculate_string_similarity, clean_artist, clean_title
+from src.normalizer import calculate_candidate_score, clean_artist, clean_title
 from src.providers.base import BaseLyricsProvider
 
 logger = logging.getLogger("nla.providers.amll")
@@ -22,7 +21,6 @@ class AMLLProvider(BaseLyricsProvider):
     description = "Apple Music-Like Lyrics Database (TTML with syllable-level sync)"
 
     DEFAULT_API_BASE = "https://api.amll.dev"
-    GITHUB_RAW_BASE = "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main"
 
     async def get_lyrics(self, track: TrackMetadata) -> Optional[LyricsResult]:
         api_base = self.config.custom_url or self.DEFAULT_API_BASE
@@ -148,6 +146,7 @@ class AMLLProvider(BaseLyricsProvider):
                     provider_name=self.name,
                     title=candidate_title or track.title,
                     artist=candidate_artist or track.artist,
+                    match_score=score,
                     metadata={"amll_id": lyric_id, "filename": filename},
                 )
 
@@ -172,6 +171,7 @@ class AMLLProvider(BaseLyricsProvider):
             if isinstance(data, dict) and "data" in data and isinstance(data["data"], dict):
                 data = data["data"]
 
+            score = 1.0
             ttml = data.get("lyrics") or data.get("ttml") or data.get("content")
             if ttml and isinstance(ttml, str) and "<tt" in ttml.lower():
                 return LyricsResult(
@@ -181,6 +181,7 @@ class AMLLProvider(BaseLyricsProvider):
                     provider_name=self.name,
                     title=data.get("trackName") or data.get("title"),
                     artist=data.get("artistName") or data.get("artist"),
+                    match_score=score,
                     metadata=data,
                 )
         except Exception as e:

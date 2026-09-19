@@ -1,7 +1,6 @@
 """Unit tests for sidecar lyrics storage, priority order, and atomic writing."""
 
 from pathlib import Path
-import pytest
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType
 from src.storage import (
     get_existing_lyrics_file,
@@ -184,4 +183,61 @@ def test_should_skip_track_storage_modes(tmp_path: Path):
     ttml_file.write_text("<tt>...</tt>")
     skip, reason = should_skip_track(audio_file, storage_mode="both", upgrade_quality=True)
     assert skip is True
+
+
+def test_storage_output_dir(tmp_path: Path):
+    audio_dir = tmp_path / "music"
+    audio_dir.mkdir()
+    lyrics_dir = tmp_path / "lyrics"
+    lyrics_dir.mkdir()
+
+    audio_file = audio_dir / "track.flac"
+    audio_file.write_bytes(b"audio")
+
+    # In audio dir, no lyrics exist
+    assert get_existing_lyrics_file(audio_file) is None
+    skip, _ = should_skip_track(audio_file, output_dir=lyrics_dir)
+    assert skip is False
+
+    # Place lyrics in output_dir
+    sidecar = lyrics_dir / "track.ttml"
+    sidecar.write_text("<tt>...</tt>")
+
+    # Should find in output_dir
+    found = get_existing_lyrics_file(audio_file, output_dir=lyrics_dir)
+    assert found is not None
+    assert found[0] == sidecar
+    assert found[1] == LyricsFormat.TTML
+
+    # should_skip_track should skip because of TTML in output_dir
+    skip, reason = should_skip_track(audio_file, output_dir=lyrics_dir)
+    assert skip is True
+    assert "TTML" in reason
+
+
+def test_get_existing_lyrics_file_with_output_dir(tmp_path):
+    """Regression: get_existing_lyrics_file must search output_dir when provided."""
+    from src.storage import get_existing_lyrics_file
+    audio_file = tmp_path / "music" / "Artist - Song.flac"
+    audio_file.parent.mkdir(parents=True)
+    audio_file.write_bytes(b"dummy")
+    
+    output_dir = tmp_path / "lyrics"
+    output_dir.mkdir()
+    
+    # No lyrics anywhere → None
+    assert get_existing_lyrics_file(audio_file, output_dir=output_dir) is None
+    
+    # Write lyrics to output_dir
+    lyrics_file = output_dir / "Artist - Song.ttml"
+    lyrics_file.write_text("<tt>test</tt>", encoding="utf-8")
+    
+    # Should find it in output_dir
+    result = get_existing_lyrics_file(audio_file, output_dir=output_dir)
+    assert result is not None
+    found_path, found_format = result
+    assert found_path == lyrics_file
+    
+    # Should NOT find it when searching audio_path.parent (no output_dir)
+    assert get_existing_lyrics_file(audio_file) is None
 

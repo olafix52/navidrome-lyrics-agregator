@@ -1,7 +1,7 @@
 """BiniLyrics / Community Synced REST Provider."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from src.models import (
     LyricsFormat,
     LyricsResult,
@@ -9,7 +9,7 @@ from src.models import (
     TrackMetadata,
     detect_sync_type,
 )
-from src.normalizer import calculate_candidate_score, calculate_string_similarity, clean_artist, clean_title, safe_float
+from src.normalizer import calculate_candidate_score, clean_artist, clean_title, safe_float
 from src.providers.base import BaseLyricsProvider
 
 logger = logging.getLogger("nla.providers.binilyrics")
@@ -89,7 +89,7 @@ class BiniLyricsProvider(BaseLyricsProvider):
 
                 candidates.sort(key=lambda x: x[0], reverse=True)
 
-                for _, item in candidates:
+                for total, item in candidates:
                     lyrics_url = item.get("lyricsUrl") or item.get("url")
                     ttml_content = item.get("ttml") or item.get("content")
                     timing_hint = item.get("timing_type")
@@ -107,6 +107,7 @@ class BiniLyricsProvider(BaseLyricsProvider):
                             duration=safe_float(item.get("duration")),
                             metadata=item,
                             hint=timing_hint,
+                            match_score=total,
                         )
 
             # 2. Legacy / Direct payload fallback (mock/alternate formats)
@@ -141,6 +142,7 @@ class BiniLyricsProvider(BaseLyricsProvider):
         duration: Optional[float],
         metadata: Dict[str, Any],
         hint: Optional[str] = None,
+        match_score: float = 1.0,
     ) -> LyricsResult:
         if "<tt" in content.lower():
             fmt = LyricsFormat.TTML
@@ -160,5 +162,6 @@ class BiniLyricsProvider(BaseLyricsProvider):
             duration=duration,
             title=title,
             artist=artist,
+            match_score=match_score,
             metadata=metadata,
         )

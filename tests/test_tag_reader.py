@@ -1,7 +1,6 @@
 """Unit tests for tag reader and audio file detection."""
 
 from pathlib import Path
-import pytest
 from src.tag_reader import (
     _fallback_parse_filename,
     is_supported_audio_file,

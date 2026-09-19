@@ -110,3 +110,66 @@ def test_load_config_custom_file(tmp_path: Path):
     assert cfg.concurrency == 8
     assert cfg.log_level == "DEBUG"
 
+
+def test_config_deep_merge():
+    from src.config import _deep_merge
+    base = {
+        "concurrency": 2,
+        "providers": {
+            "amll": {"enabled": True, "timeout": 10},
+            "lrclib": {"enabled": False},
+        },
+    }
+    override = {
+        "concurrency": 5,
+        "providers": {
+            "amll": {"timeout": 20},
+            "netease": {"enabled": True},
+        },
+    }
+    merged = _deep_merge(base, override)
+    assert merged["concurrency"] == 5
+    assert merged["providers"]["amll"]["enabled"] is True
+    assert merged["providers"]["amll"]["timeout"] == 20
+    assert merged["providers"]["lrclib"]["enabled"] is False
+    assert merged["providers"]["netease"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_scanner_handles_worker_exceptions(tmp_path: Path):
+    track1 = tmp_path / "track1.mp3"
+    track2 = tmp_path / "track2.mp3"
+    track1.write_bytes(b"dummy1")
+    track2.write_bytes(b"dummy2")
+
+    config = AppConfig(music_dir=tmp_path, concurrency=2)
+    mock_matcher = MagicMock()
+    scanner = LibraryScanner(config, mock_matcher)
+
+    # Make _process_single_file raise on track1 and succeed on track2
+    async def _mock_process(fp: Path):
+        if fp == track1:
+            raise RuntimeError("Unexpected failure")
+        return ProcessResult(file_path=fp, status=MatchStatus.SUCCESS)
+
+    with patch.object(scanner, "_process_single_file", side_effect=_mock_process):
+        results = await scanner.process_files([track1, track2], show_progress=False)
+        # Exception should be filtered out, only successful ProcessResult returned
+        assert len(results) == 1
+        assert results[0].file_path == track2
+
+    # Also test with show_progress=True
+    with patch.object(scanner, "_process_single_file", side_effect=_mock_process):
+        results = await scanner.process_files([track1, track2], show_progress=True)
+        assert len(results) == 1
+        assert results[0].file_path == track2
+
+
+def test_ttml_rounding_boundary():
+    from src.ttml import format_ttml_timestamp
+    # 59.9999 seconds should round to 01:00.000 rather than 00:60.000
+    assert format_ttml_timestamp(59.9999) == "01:00.000"
+    assert format_ttml_timestamp(59.9994) == "00:59.999"
+    assert format_ttml_timestamp(119.9999) == "02:00.000"
+
+

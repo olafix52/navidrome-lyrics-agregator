@@ -1,5 +1,6 @@
 """NetEase Cloud Music 163 API Lyrics Provider."""
 
+import json
 import logging
 import re
 from typing import Optional
@@ -140,7 +141,7 @@ class NetEaseProvider(BaseLyricsProvider):
 
             scored_songs.sort(key=lambda x: x[0], reverse=True)
 
-            for score, song, song_duration, song_name, song_artists in scored_songs:
+            for best_score, song, song_duration, song_name, song_artists in scored_songs:
                 song_id = song.get("id")
 
                 # Fetch lyric for this song ID
@@ -159,7 +160,11 @@ class NetEaseProvider(BaseLyricsProvider):
                 if not lyric_resp:
                     continue
 
-                lyric_data = lyric_resp.json()
+                try:
+                    lyric_data = lyric_resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                    continue
 
                 # 1. First attempt syllable-by-syllable YRC -> TTML (word_sync)
                 yrc_obj = lyric_data.get("yrc")
@@ -180,6 +185,7 @@ class NetEaseProvider(BaseLyricsProvider):
                                 duration=song_duration or None,
                                 title=song_name or title,
                                 artist=song_artists or artist,
+                                match_score=best_score,
                                 metadata={"netease_id": song_id, "source_format": "yrc"},
                             )
 
@@ -201,6 +207,7 @@ class NetEaseProvider(BaseLyricsProvider):
                     duration=song_duration or None,
                     title=song_name or title,
                     artist=song_artists or artist,
+                    match_score=best_score,
                     metadata={"netease_id": song_id, "source_format": "lrc"},
                 )
 

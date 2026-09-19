@@ -4,8 +4,8 @@ import logging
 import re
 import urllib.parse
 from bs4 import BeautifulSoup
-from typing import Dict, List, Optional
-from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata, detect_sync_type
+from typing import Dict, Optional
+from src.models import LyricsFormat, LyricsResult, TrackMetadata, detect_sync_type
 from src.normalizer import calculate_candidate_score, clean_artist, clean_title
 from src.providers.base import BaseLyricsProvider
 

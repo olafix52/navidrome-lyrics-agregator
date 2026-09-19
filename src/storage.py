@@ -18,14 +18,15 @@ LYRICS_EXTENSIONS_PRIORITY = [
 ]
 
 
-def get_existing_lyrics_file(audio_path: Path) -> Optional[Tuple[Path, LyricsFormat]]:
+def get_existing_lyrics_file(audio_path: Path, output_dir: Optional[Path] = None) -> Optional[Tuple[Path, LyricsFormat]]:
     """Check if any companion lyrics file exists for the given audio file.
     
     Returns tuple of (file_path, format) of the highest quality existing lyrics, or None.
     """
+    search_dir = output_dir if output_dir else audio_path.parent
     for fmt, exts in LYRICS_EXTENSIONS_PRIORITY:
         for ext in exts:
-            candidate = audio_path.parent / f"{audio_path.stem}{ext}"
+            candidate = search_dir / f"{audio_path.stem}{ext}"
             if candidate.is_file() and candidate.stat().st_size > 0:
                 return candidate, fmt
     return None
@@ -36,6 +37,7 @@ def should_skip_track(
     overwrite: bool = False,
     upgrade_quality: bool = True,
     storage_mode: str = "sidecar",
+    output_dir: Optional[Path] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Determine if a track should be skipped based on existing sidecar files or embedded audio tags.
     
@@ -54,7 +56,7 @@ def should_skip_track(
         return False, None
 
     # 2. Sidecar or Both mode: check sidecar files
-    existing = get_existing_lyrics_file(audio_path)
+    existing = get_existing_lyrics_file(audio_path, output_dir=output_dir)
 
     # In 'both' mode, also check embedded tags if sidecar already exists
     if mode == StorageMode.BOTH.value:

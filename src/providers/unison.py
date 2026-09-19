@@ -1,5 +1,4 @@
-"""Better Lyrics Unison Community Lyrics Provider."""
-
+import json
 import logging
 from typing import Optional
 from src.models import (
@@ -28,6 +27,7 @@ class UnisonProvider(BaseLyricsProvider):
 
         title = track.clean_title or clean_title(track.title)
         artist = track.clean_artist or clean_artist(track.artist)
+        score = 1.0
 
         # 1. Try direct lookup by song and artist
         endpoint = f"{api_base.rstrip('/')}/lyrics"
@@ -45,8 +45,10 @@ class UnisonProvider(BaseLyricsProvider):
                     candidate_data = res_json["data"]
                     c_title = candidate_data.get("song") or candidate_data.get("title") or ""
                     c_artist = candidate_data.get("artist") or ""
-                    if calculate_candidate_score(title, artist, c_title, c_artist) >= 0.60:
+                    cand_score = calculate_candidate_score(title, artist, c_title, c_artist)
+                    if cand_score >= 0.60:
                         data = candidate_data
+                        score = cand_score
             except Exception:
                 data = None
 
@@ -72,15 +74,20 @@ class UnisonProvider(BaseLyricsProvider):
                                 scored_items.append((cand_score, cand_id))
 
                         scored_items.sort(key=lambda x: x[0], reverse=True)
-                        for _, cand_id in scored_items:
+                        for cand_score, cand_id in scored_items:
                             if not cand_id:
                                 continue
                             get_url = f"{api_base.rstrip('/')}/lyrics/{cand_id}"
                             get_resp = await self.request_with_retry("GET", get_url)
                             if get_resp and get_resp.status_code == 200:
-                                g_json = get_resp.json()
+                                try:
+                                    g_json = get_resp.json()
+                                except (json.JSONDecodeError, ValueError):
+                                    logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                                    continue
                                 if g_json.get("success") and isinstance(g_json.get("data"), dict):
                                     data = g_json["data"]
+                                    score = cand_score
                                     break
                 except Exception as e:
                     logger.debug(f"[{self.name}] Error searching Unison lyrics: {e}")
@@ -118,6 +125,7 @@ class UnisonProvider(BaseLyricsProvider):
             provider_name=self.name,
             title=resp_title,
             artist=resp_artist,
+            match_score=score,
             metadata={
                 "unison_id": data.get("id"),
                 "score": data.get("score"),

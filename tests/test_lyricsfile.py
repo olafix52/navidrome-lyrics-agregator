@@ -1,7 +1,6 @@
 """Unit tests for Lyricsfile 1.0 format parser, converter, and validator."""
 
 from src.lyricsfile import (
-    LyricsfileDocument,
     lrc_to_lyricsfile,
     parse_lrc_timestamp_to_ms,
     validate_lyricsfile_yaml,
@@ -106,3 +105,20 @@ def test_detect_sync_type():
 
     # Unsynced plain text
     assert detect_sync_type("Just plain text\nline 2", LyricsFormat.TXT) == LyricsSyncType.UNSYNCED
+
+
+def test_ttml_timestamp_minute_boundary():
+    """Regression: format_ttml_timestamp must not produce 00:60.000."""
+    from src.ttml import format_ttml_timestamp
+    # Exact minute boundary
+    assert format_ttml_timestamp(60.0) == "01:00.000"
+    # Just below minute boundary that rounds up
+    result = format_ttml_timestamp(59.9997)
+    assert ":60" not in result  # Must not produce 00:60.000
+    assert result == "01:00.000"  # Should round up to next minute
+    # Normal values
+    assert format_ttml_timestamp(0.0) == "00:00.000"
+    assert format_ttml_timestamp(30.5) == "00:30.500"
+    assert format_ttml_timestamp(125.123) == "02:05.123"
+    # Negative clamped to zero
+    assert format_ttml_timestamp(-5.0) == "00:00.000"

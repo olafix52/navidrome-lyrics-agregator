@@ -9,8 +9,9 @@ def format_ttml_timestamp(seconds: float) -> str:
     """Format seconds into standard TTML timestamp mm:ss.xxx."""
     if seconds < 0:
         seconds = 0.0
-    m = int(seconds // 60)
-    s = seconds % 60
+    total_ms = int(round(seconds * 1000))
+    m, remainder_ms = divmod(total_ms, 60000)
+    s = remainder_ms / 1000.0
     return f"{m:02d}:{s:06.3f}"
 
 

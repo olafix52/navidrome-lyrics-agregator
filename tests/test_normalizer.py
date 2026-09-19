@@ -1,6 +1,5 @@
 """Unit tests for metadata normalization, duration tolerance, and string similarity."""
 
-import pytest
 from src.normalizer import (
     calculate_artist_similarity,
     calculate_candidate_score,
@@ -156,4 +155,25 @@ def test_calculate_candidate_score():
     # Target artist empty -> accepts on title
     score = calculate_candidate_score("Ghost Town", "", "Ghost Town", "KOO's")
     assert score == 1.0
+
+
+def test_safe_float():
+    """Regression: safe_float must handle None, zero, valid floats, and string numbers."""
+    from src.normalizer import safe_float
+    # None input → None output
+    assert safe_float(None) is None
+    # Zero input → None output (0 means "unknown duration")
+    assert safe_float(0) is None
+    assert safe_float(0.0) is None
+    # Valid positive float → returns float
+    assert safe_float(120.5) == 120.5
+    assert safe_float(1) == 1.0
+    # String number → returns float
+    assert safe_float("42.5") == 42.5
+    # Invalid string → returns default
+    assert safe_float("not_a_number") is None
+    assert safe_float("not_a_number", 99.0) == 99.0
+    # Custom default for zero
+    assert safe_float(0, 0.0) is None
+    assert safe_float(0, 99.0) == 99.0
 

@@ -1,11 +1,9 @@
-"""Apple Music TTML Lyrics Provider."""
-
+import json
 import logging
 from typing import Any, Dict, Optional
 from src.models import (
     LyricsFormat,
     LyricsResult,
-    LyricsSyncType,
     TrackMetadata,
     detect_sync_type,
 )
@@ -114,13 +112,18 @@ class AppleMusicProvider(BaseLyricsProvider):
 
             scored_candidates.sort(key=lambda x: x[0], reverse=True)
 
-            for score, am_id, item in scored_candidates[:5]:
+            for total_score, am_id, item in scored_candidates[:5]:
                 get_url = f"{bridge_url.rstrip('/')}/v1/lyrics/get"
                 get_resp = await self.request_with_retry("GET", get_url, params={"id": item.get("id")})
                 if not get_resp:
                     continue
 
-                res_json = get_resp.json()
+                try:
+                    res_json = get_resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                    continue
+
                 if isinstance(res_json, dict) and "data" in res_json and isinstance(res_json["data"], dict):
                     res_json = res_json["data"]
 
@@ -136,6 +139,7 @@ class AppleMusicProvider(BaseLyricsProvider):
                         provider_name=self.name,
                         title=music_names[0] if music_names else (res_json.get("trackName") or track.title),
                         artist=", ".join(artist_names) if artist_names else (res_json.get("artistName") or track.artist),
+                        match_score=total_score,
                         metadata={"apple_music_id": am_id, "provider": "apple_music"},
                     )
         except Exception as e:
@@ -181,6 +185,11 @@ class AppleMusicProvider(BaseLyricsProvider):
                 if not song_id:
                     continue
 
+                best_title_score = calculate_string_similarity(
+                    clean_title(title),
+                    clean_title(song.get("attributes", {}).get("name", "")),
+                )
+
                 # 1. Try syllable-level TTML lyrics endpoint first
                 syllable_url = f"https://amp-api.music.apple.com/v1/catalog/{storefront}/songs/{song_id}/syllable-lyrics"
                 lyr_resp = await self.request_with_retry("GET", syllable_url, headers=headers)
@@ -193,7 +202,12 @@ class AppleMusicProvider(BaseLyricsProvider):
                 if not lyr_resp or lyr_resp.status_code != 200:
                     continue
 
-                lyr_data = lyr_resp.json()
+                try:
+                    lyr_data = lyr_resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                    continue
+
                 lyr_items = lyr_data.get("data", [])
                 if lyr_items:
                     ttml = lyr_items[0].get("attributes", {}).get("ttml")
@@ -206,6 +220,7 @@ class AppleMusicProvider(BaseLyricsProvider):
                             provider_name=self.name,
                             title=song.get("attributes", {}).get("name"),
                             artist=song.get("attributes", {}).get("artistName"),
+                            match_score=best_title_score,
                             metadata={"song_id": song_id},
                         )
         except Exception as e:

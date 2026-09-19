@@ -225,3 +225,42 @@ async def test_scanner_auto_trigger_navidrome_scan():
         mock_scan.assert_awaited_once_with(full_scan=False)
 
     await matcher.close()
+
+
+@pytest.mark.asyncio
+async def test_subsonic_scan_path_traversal_prevention(tmp_path):
+    from src.config import AppConfig, NavidromeConfig
+    from src.scanner import LibraryScanner
+    from src.matcher import LyricsMatcher
+    from pathlib import Path
+
+    output_dir = tmp_path / "lyrics_out"
+    config = AppConfig(
+        output_dir=output_dir,
+        navidrome=NavidromeConfig(url="http://mock:4533", user="u", password="p"),
+    )
+    matcher = LyricsMatcher(config, [])
+    scanner = LibraryScanner(config=config, matcher=matcher)
+
+    # Subsonic track with absolute leading slashes
+    track_with_slash = SubsonicTrack(
+        id="1",
+        title="Song",
+        artist="Artist",
+        path="/Artist/Album/Song.flac",
+        suffix="flac",
+    )
+
+    with patch("src.subsonic.SubsonicClient.ping", new_callable=AsyncMock, return_value=True), \
+         patch("src.subsonic.SubsonicClient.get_all_tracks", new_callable=AsyncMock, return_value=[track_with_slash]), \
+         patch.object(scanner, "process_metadata_batch", new_callable=AsyncMock, return_value=[]) as mock_batch:
+        await scanner.scan_subsonic_library()
+        mock_batch.assert_called_once()
+        metadata_list = mock_batch.call_args[0][0]
+        assert len(metadata_list) == 1
+        # The path should be rooted inside output_dir, not /Artist/...
+        assert metadata_list[0].file_path == output_dir / "Artist/Album/Song.flac"
+        assert metadata_list[0].file_path != Path("/Artist/Album/Song.flac")
+
+    await matcher.close()
+

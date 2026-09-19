@@ -45,7 +45,7 @@ class LrclibProvider(BaseLyricsProvider):
         if response:
             try:
                 data = response.json()
-                res = self._parse_lrclib_response(data, track)
+                res = self._parse_lrclib_response(data, track, score=1.0)
                 if res:
                     return res
             except Exception as e:
@@ -74,8 +74,8 @@ class LrclibProvider(BaseLyricsProvider):
                             scored_items.append((score, item))
 
                     scored_items.sort(key=lambda x: x[0], reverse=True)
-                    for _, item in scored_items:
-                        res = self._parse_lrclib_response(item, track)
+                    for score, item in scored_items:
+                        res = self._parse_lrclib_response(item, track, score=score)
                         if res:
                             return res
             except Exception as e:
@@ -83,7 +83,12 @@ class LrclibProvider(BaseLyricsProvider):
 
         return None
 
-    def _parse_lrclib_response(self, data: Dict[str, Any], track: TrackMetadata) -> Optional[LyricsResult]:
+    def _parse_lrclib_response(
+        self,
+        data: Dict[str, Any],
+        track: TrackMetadata,
+        score: float = 1.0,
+    ) -> Optional[LyricsResult]:
         if not isinstance(data, dict):
             return None
 
@@ -104,6 +109,7 @@ class LrclibProvider(BaseLyricsProvider):
                     title=data.get("trackName") or data.get("name"),
                     artist=data.get("artistName"),
                     album=data.get("albumName"),
+                    match_score=score,
                     metadata={"lrclib_id": data.get("id"), "format": "yaml"},
                 )
 
@@ -119,6 +125,7 @@ class LrclibProvider(BaseLyricsProvider):
                 title=data.get("trackName") or data.get("name"),
                 artist=data.get("artistName"),
                 album=data.get("albumName"),
+                match_score=score,
                 metadata={"lrclib_id": data.get("id"), "format": "lrc"},
             )
 
@@ -133,6 +140,7 @@ class LrclibProvider(BaseLyricsProvider):
                 title=data.get("trackName") or data.get("name"),
                 artist=data.get("artistName"),
                 album=data.get("albumName"),
+                match_score=score,
                 metadata={"lrclib_id": data.get("id"), "format": "yaml"},
             )
 
@@ -147,6 +155,7 @@ class LrclibProvider(BaseLyricsProvider):
                 title=data.get("trackName") or data.get("name"),
                 artist=data.get("artistName"),
                 album=data.get("albumName"),
+                match_score=score,
                 metadata={"instrumental": True},
             )
 
@@ -162,6 +171,7 @@ class LrclibProvider(BaseLyricsProvider):
                 title=data.get("trackName") or data.get("name"),
                 artist=data.get("artistName"),
                 album=data.get("albumName"),
+                match_score=score,
                 metadata={"lrclib_id": data.get("id"), "format": "plain"},
             )
 

@@ -2,6 +2,7 @@
 
 import base64
 import html
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -454,51 +455,59 @@ class QQMusicProvider(BaseLyricsProvider):
             musicu_resp = await self.request_with_retry("POST", self.DEFAULT_MUSICU_URL, json=musicu_payload, headers=headers)
             if musicu_resp and musicu_resp.status_code == 200:
                 try:
-                    m_data = musicu_resp.json()
+                    try:
+                        m_data = musicu_resp.json()
+                    except (json.JSONDecodeError, ValueError):
+                        logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                        m_data = None
 
-                    # Handle direct top-level lyric (legacy mock / response format)
-                    if "lyric" in m_data and "req" not in m_data:
-                        raw_lyric = m_data.get("lyric", "")
-                        if raw_lyric:
-                            sync_type = detect_sync_type(raw_lyric, LyricsFormat.LRC)
-                            return LyricsResult(
-                                content=raw_lyric.strip(),
-                                format=LyricsFormat.LRC,
-                                sync_type=sync_type,
-                                provider_name=self.name,
-                                title=candidate_title,
-                                artist=candidate_artist,
-                                metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
-                            )
-
-                    req_data = m_data.get("req", {}).get("data", {})
-                    qrc_hex = req_data.get("lyric", "")
-                    if qrc_hex and isinstance(qrc_hex, str):
-                        # If encrypted hex QRC
-                        if len(qrc_hex) > 64 and all(c in "0123456789abcdefABCDEF \r\n" for c in qrc_hex):
-                            qrc_xml = qrc_decrypt(qrc_hex)
-                            ttml_content = convert_qrc_to_ttml(qrc_xml, title=candidate_title, artist=candidate_artist)
-                            if ttml_content and "<tt" in ttml_content.lower():
+                    if m_data:
+                        # Handle direct top-level lyric (legacy mock / response format)
+                        if "lyric" in m_data and "req" not in m_data:
+                            raw_lyric = m_data.get("lyric", "")
+                            if raw_lyric:
+                                sync_type = detect_sync_type(raw_lyric, LyricsFormat.LRC)
                                 return LyricsResult(
-                                    content=ttml_content.strip(),
-                                    format=LyricsFormat.TTML,
-                                    sync_type=LyricsSyncType.WORD_SYNC,
+                                    content=raw_lyric.strip(),
+                                    format=LyricsFormat.LRC,
+                                    sync_type=sync_type,
                                     provider_name=self.name,
                                     title=candidate_title,
                                     artist=candidate_artist,
-                                    metadata={"songmid": songmid, "source_format": "qrc", "match_score": best_score},
+                                    match_score=best_score,
+                                    metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
                                 )
-                        elif qrc_hex.strip().startswith("["):
-                            sync_type = detect_sync_type(qrc_hex, LyricsFormat.LRC)
-                            return LyricsResult(
-                                content=qrc_hex.strip(),
-                                format=LyricsFormat.LRC,
-                                sync_type=sync_type,
-                                provider_name=self.name,
-                                title=candidate_title,
-                                artist=candidate_artist,
-                                metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
-                            )
+
+                        req_data = m_data.get("req", {}).get("data", {})
+                        qrc_hex = req_data.get("lyric", "")
+                        if qrc_hex and isinstance(qrc_hex, str):
+                            # If encrypted hex QRC
+                            if len(qrc_hex) > 64 and all(c in "0123456789abcdefABCDEF \r\n" for c in qrc_hex):
+                                qrc_xml = qrc_decrypt(qrc_hex)
+                                ttml_content = convert_qrc_to_ttml(qrc_xml, title=candidate_title, artist=candidate_artist)
+                                if ttml_content and "<tt" in ttml_content.lower():
+                                    return LyricsResult(
+                                        content=ttml_content.strip(),
+                                        format=LyricsFormat.TTML,
+                                        sync_type=LyricsSyncType.WORD_SYNC,
+                                        provider_name=self.name,
+                                        title=candidate_title,
+                                        artist=candidate_artist,
+                                        match_score=best_score,
+                                        metadata={"songmid": songmid, "source_format": "qrc", "match_score": best_score},
+                                    )
+                            elif qrc_hex.strip().startswith("["):
+                                sync_type = detect_sync_type(qrc_hex, LyricsFormat.LRC)
+                                return LyricsResult(
+                                    content=qrc_hex.strip(),
+                                    format=LyricsFormat.LRC,
+                                    sync_type=sync_type,
+                                    provider_name=self.name,
+                                    title=candidate_title,
+                                    artist=candidate_artist,
+                                    match_score=best_score,
+                                    metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
+                                )
                 except Exception as e:
                     logger.debug(f"[{self.name}] Error decrypting/converting QRC for {songmid}: {e}")
 
@@ -514,7 +523,12 @@ class QQMusicProvider(BaseLyricsProvider):
             if not lyric_resp or lyric_resp.status_code != 200:
                 return None
 
-            l_data = lyric_resp.json()
+            try:
+                l_data = lyric_resp.json()
+            except (json.JSONDecodeError, ValueError):
+                logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                return None
+
             if l_data.get("retcode", -1) != 0 and l_data.get("code", -1) != 0:
                 return None
 
@@ -544,6 +558,7 @@ class QQMusicProvider(BaseLyricsProvider):
                 provider_name=self.name,
                 title=candidate_title,
                 artist=candidate_artist,
+                match_score=best_score,
                 metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
             )
 

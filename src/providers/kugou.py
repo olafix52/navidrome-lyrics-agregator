@@ -1,6 +1,7 @@
 """Kugou Music API Lyrics Provider."""
 
 import base64
+import json
 import logging
 import re
 from typing import Optional
@@ -185,7 +186,12 @@ class KugouProvider(BaseLyricsProvider):
                 if not krcs_resp:
                     continue
 
-                krcs_data = krcs_resp.json()
+                try:
+                    krcs_data = krcs_resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                    continue
+
                 candidates = krcs_data.get("candidates", [])
                 if not candidates:
                     continue
@@ -225,6 +231,7 @@ class KugouProvider(BaseLyricsProvider):
                                         duration=song_duration or None,
                                         title=candidate_title,
                                         artist=candidate_artist,
+                                        match_score=score,
                                         metadata={"kugou_id": candidate_id, "hash": file_hash, "source_format": "lrc"},
                                     )
 
@@ -244,6 +251,7 @@ class KugouProvider(BaseLyricsProvider):
                                     duration=song_duration or None,
                                     title=candidate_title,
                                     artist=candidate_artist,
+                                    match_score=score,
                                     metadata={"kugou_id": candidate_id, "hash": file_hash, "source_format": "krc"},
                                 )
                     except Exception as e:
@@ -270,6 +278,7 @@ class KugouProvider(BaseLyricsProvider):
                                     duration=song_duration or None,
                                     title=candidate_title,
                                     artist=candidate_artist,
+                                    match_score=score,
                                     metadata={"kugou_id": candidate_id, "hash": file_hash, "source_format": "lrc"},
                                 )
                     except Exception as e:

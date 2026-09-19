@@ -19,6 +19,8 @@ from src.scanner import LibraryScanner
 from src.storage import get_existing_lyrics_file
 from src.watcher import DirectoryWatcher
 
+logger = logging.getLogger("nla.main")
+
 
 async def run_scan_command(args: argparse.Namespace, config) -> None:
     """Execute one-time library scan."""
@@ -144,7 +146,12 @@ async def run_daemon_command(args: argparse.Namespace, config) -> None:
     try:
         while True:
             console.print(f"[bold cyan]>>> Running periodic library scan at {Path(config.music_dir)}[/bold cyan]")
-            await scanner.scan_and_process(show_progress=False)
+            try:
+                await scanner.scan_and_process(show_progress=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Periodic scan failed, will retry next interval: {e}", exc_info=True)
             console.print(f"[yellow]Sleeping for {interval_sec} seconds until next scan...[/yellow]")
             await asyncio.sleep(interval_sec)
     except asyncio.CancelledError:
@@ -276,7 +283,7 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
 
         candidates = []
         for audio_path in all_audio:
-            existing = get_existing_lyrics_file(audio_path)
+            existing = get_existing_lyrics_file(audio_path, output_dir=config.output_dir)
             if existing:
                 _, fmt = existing
                 if not args.force and fmt in (LyricsFormat.TTML, LyricsFormat.YAML):

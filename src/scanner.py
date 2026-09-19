@@ -78,14 +78,26 @@ class LibraryScanner:
                         return res
 
                 tasks = [_worker(fp) for fp in audio_files]
-                results = await asyncio.gather(*tasks)
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                results = []
+                for r in raw_results:
+                    if isinstance(r, Exception):
+                        logger.error(f"Task failed: {r}")
+                    else:
+                        results.append(r)
         else:
             async def _worker_no_prog(file_path: Path) -> ProcessResult:
                 async with self.semaphore:
                     return await self._process_single_file(file_path)
 
             tasks = [_worker_no_prog(fp) for fp in audio_files]
-            results = await asyncio.gather(*tasks)
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = []
+            for r in raw_results:
+                if isinstance(r, Exception):
+                    logger.error(f"Task failed: {r}")
+                else:
+                    results.append(r)
 
         self.display_summary(results)
 
@@ -129,14 +141,26 @@ class LibraryScanner:
                         return res
 
                 tasks = [_worker(m) for m in metadata_list]
-                results = await asyncio.gather(*tasks)
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                results = []
+                for r in raw_results:
+                    if isinstance(r, Exception):
+                        logger.error(f"Task failed: {r}")
+                    else:
+                        results.append(r)
         else:
             async def _worker_no_prog(meta: TrackMetadata) -> ProcessResult:
                 async with self.semaphore:
                     return await self.matcher.process_track(meta)
 
             tasks = [_worker_no_prog(m) for m in metadata_list]
-            results = await asyncio.gather(*tasks)
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = []
+            for r in raw_results:
+                if isinstance(r, Exception):
+                    logger.error(f"Task failed: {r}")
+                else:
+                    results.append(r)
 
         self.display_summary(results)
 
@@ -197,7 +221,7 @@ class LibraryScanner:
                     continue
 
                 dest_base = self.config.output_dir if self.config.output_dir else self.config.music_dir
-                track_file = dest_base / st.path if st.path else dest_base / f"{st.artist} - {st.title}.{st.suffix}"
+                track_file = dest_base / st.path.lstrip("/\\") if st.path else dest_base / f"{st.artist} - {st.title}.{st.suffix}"
 
                 meta = TrackMetadata(
                     file_path=track_file,

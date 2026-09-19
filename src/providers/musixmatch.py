@@ -232,6 +232,7 @@ class MusixmatchProvider(BaseLyricsProvider):
             else:
                 cand_title = title
                 cand_artist = artist
+                score = 1.0
 
             # 1. Attempt syllable-level RichSync TTML first
             richsync_call = macro_calls.get("track.richsync.get", {})
@@ -257,6 +258,7 @@ class MusixmatchProvider(BaseLyricsProvider):
                             duration=cand_duration,
                             title=cand_title,
                             artist=cand_artist,
+                            match_score=score,
                             metadata={"musixmatch_track_id": track_id, "type": "richsync"},
                         )
 
@@ -283,6 +285,7 @@ class MusixmatchProvider(BaseLyricsProvider):
                             duration=safe_float(sub.get("subtitle_length")) or cand_duration,
                             title=cand_title,
                             artist=cand_artist,
+                            match_score=score,
                             metadata={
                                 "musixmatch_id": sub.get("subtitle_id"),
                                 "musixmatch_track_id": track_id,
@@ -310,6 +313,7 @@ class MusixmatchProvider(BaseLyricsProvider):
                         duration=cand_duration,
                         title=cand_title,
                         artist=cand_artist,
+                        match_score=score,
                         metadata={"musixmatch_track_id": track_id},
                     )
 

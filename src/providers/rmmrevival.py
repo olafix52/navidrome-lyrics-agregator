@@ -1,7 +1,7 @@
 """RMM Revival (lyrics.rmmreviv.al) Lyrics Provider."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata, detect_sync_type
 from src.normalizer import calculate_candidate_score, clean_artist, clean_title, safe_float
 from src.providers.base import BaseLyricsProvider
@@ -114,6 +114,7 @@ class RMMRevivalProvider(BaseLyricsProvider):
             cand_title = data.get("name") or title
             cand_artist = data.get("artist") or artist
             duration = safe_float(data.get("duration"))
+            score = calculate_candidate_score(title, artist, cand_title, cand_artist)
             meta = {
                 "apple_music_id": track_id,
                 "isrc": data.get("isrc"),
@@ -132,6 +133,7 @@ class RMMRevivalProvider(BaseLyricsProvider):
                     title=cand_title,
                     artist=cand_artist,
                     duration=duration,
+                    match_score=score,
                     metadata=meta,
                 )
 
@@ -147,6 +149,7 @@ class RMMRevivalProvider(BaseLyricsProvider):
                     title=cand_title,
                     artist=cand_artist,
                     duration=duration,
+                    match_score=score,
                     metadata=meta,
                 )
 
@@ -161,6 +164,7 @@ class RMMRevivalProvider(BaseLyricsProvider):
                     title=cand_title,
                     artist=cand_artist,
                     duration=duration,
+                    match_score=score,
                     metadata=meta,
                 )
 
