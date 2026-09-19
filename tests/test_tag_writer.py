@@ -88,6 +88,73 @@ def test_lyrics_to_tag_payloads_unsynced():
     assert sylt_entries == []
 
 
+def test_lyrics_to_tag_payloads_ttml_word_sync_preserves_spaces():
+    ttml = """<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Word">
+      <body>
+        <div>
+          <p begin="0.757" end="3.313">
+            <span begin="0.757" end="0.962">Where</span> <span begin="0.962" end="1.152">will</span> <span begin="1.152" end="1.424">you</span> <span begin="1.424" end="1.957">go</span> <span begin="1.957" end="3.313">now</span>
+          </p>
+          <p begin="3.761" end="6.806">
+            <span begin="3.761" end="4.085">Now</span> <span begin="4.085" end="4.322">that</span> <span begin="4.322" end="4.573">you&apos;re</span> <span begin="4.573" end="5.330">done</span>
+          </p>
+        </div>
+      </body>
+    </tt>"""
+    lyrics = LyricsResult(
+        content=ttml,
+        format=LyricsFormat.TTML,
+        sync_type=LyricsSyncType.WORD_SYNC,
+        provider_name="amll",
+    )
+    # 1. Enhanced LRC mode (default)
+    lrc_text, plain_text, sylt_entries = _lyrics_to_tag_payloads(lyrics, enhanced_lrc=True)
+    assert "[00:00.76]" in lrc_text
+    assert "<00:00.76>Where " in lrc_text
+    assert "<00:00.96>will " in lrc_text
+    assert "<00:01.96>now" in lrc_text
+    assert "Where will you go now\nNow that you're done" in plain_text
+    # SYLT entries should have word-level milliseconds
+    assert sylt_entries[0] == ("Where ", 757)
+    assert sylt_entries[1] == ("will ", 962)
+
+    # 2. Standard line-only mode
+    lrc_std, _, sylt_std = _lyrics_to_tag_payloads(lyrics, enhanced_lrc=False)
+    assert "[00:00.76]Where will you go now" in lrc_std
+    assert "<" not in lrc_std
+    assert sylt_std[0] == ("Where will you go now", 757)
+
+
+def test_embed_lyrics_flac_enhanced_word_sync(tmp_path: Path):
+    flac_file = tmp_path / "track_enhanced.flac"
+    _create_minimal_flac(flac_file)
+
+    ttml = """<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Word">
+      <body>
+        <div>
+          <p begin="0.757" end="3.313">
+            <span begin="0.757" end="0.962">Where</span> <span begin="0.962" end="1.152">will</span> <span begin="1.152" end="1.424">you</span> <span begin="1.424" end="1.957">go</span> <span begin="1.957" end="3.313">now</span>
+          </p>
+        </div>
+      </body>
+    </tt>"""
+    lyrics = LyricsResult(
+        content=ttml,
+        format=LyricsFormat.TTML,
+        sync_type=LyricsSyncType.WORD_SYNC,
+        provider_name="amll",
+    )
+
+    assert embed_lyrics_in_audio(flac_file, lyrics, dry_run=False, enhanced_lrc=True) is True
+    from mutagen.flac import FLAC
+    audio = FLAC(str(flac_file))
+    assert "LYRICS" in audio
+    assert "LYRICS_TTML" in audio
+    assert "<00:00.76>Where " in audio["LYRICS"][0]
+    assert "<00:00.96>will " in audio["LYRICS"][0]
+    assert ttml in audio["LYRICS_TTML"][0]
+
+
 def test_has_and_extract_embedded_lyrics_missing_and_empty(tmp_path: Path):
     non_existent = tmp_path / "missing.mp3"
     assert has_embedded_lyrics(non_existent) is False

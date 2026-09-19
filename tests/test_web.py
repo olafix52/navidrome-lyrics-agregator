@@ -58,6 +58,34 @@ def test_parse_ttml_to_karaoke():
     assert lines[1].words is None
 
 
+def test_parse_ttml_word_spans_whitespace_and_namespaces():
+    """Verify TTML parser preserves spaces between spans, handles namespaces, and unescapes entities."""
+    ttml = """<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Word">
+      <body>
+        <div>
+          <p begin="0.757" end="3.313" itunes:key="L2" ttm:agent="v2">
+            <span begin="0.757" end="0.962">Where</span> <span begin="0.962" end="1.152">will</span> <span begin="1.152" end="1.424">you</span> <span begin="1.424" end="1.957">go</span> <span begin="1.957" end="3.313">now</span>
+          </p>
+          <p begin="3.761" end="6.806" itunes:key="L3">
+            <span begin="3.761" end="4.085">Now</span> <span begin="4.085" end="4.322">that</span> <span begin="4.322" end="4.573">you&apos;re</span> <span begin="4.573" end="5.330">done</span> <span begin="5.330" end="6.064">with</span> <span begin="6.064" end="6.806">me?</span>
+          </p>
+          <p begin="10.000" end="15.000">
+            <span begin="10.000" end="12.000">R&amp;B</span> <span ttm:role="x-bg"><span begin="12.000" end="14.000">(On</span> <span begin="14.000" end="15.000">God)</span></span>
+          </p>
+        </div>
+      </body>
+    </tt>"""
+    lines = parse_ttml_to_karaoke(ttml)
+    assert len(lines) == 3
+    assert lines[0].text == "Where will you go now"
+    assert lines[1].text == "Now that you're done with me?"
+    assert lines[2].text == "R&B (On God)"
+    assert lines[0].words is not None
+    assert len(lines[0].words) == 5
+    assert lines[0].words[0].text == "Where "
+    assert lines[0].words[4].text == "now"
+
+
 def test_parse_yaml_to_karaoke():
     """Verify Lyricsfile 1.0 YAML parsing with words and line timings."""
     yaml_content = """

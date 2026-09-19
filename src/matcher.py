@@ -108,6 +108,7 @@ class LyricsMatcher:
                 storage_mode=getattr(self.config, "storage_mode", "sidecar"),
                 output_dir=getattr(self.config, "output_dir", None),
                 dry_run=self.config.dry_run,
+                enhanced_lrc=getattr(self.config, "embed_word_sync", True),
             )
 
             dest_desc = []

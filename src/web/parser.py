@@ -1,5 +1,6 @@
 """Karaoke parsing utilities converting TTML, YAML, LRC, and TXT into structured karaoke timing models."""
 
+import html
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
@@ -56,41 +57,70 @@ def parse_time_str_to_seconds(time_str: str) -> Optional[float]:
     return None
 
 
+def _get_element_attr(el: ET.Element, attr_name: str) -> str:
+    """Retrieve attribute value ignoring any XML namespace prefix."""
+    attr_lower = attr_name.lower()
+    for k, v in el.attrib.items():
+        if k.split("}")[-1].lower() == attr_lower:
+            return v
+    return ""
+
+
 def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
     """Parse TTML XML document into structured KaraokeLine objects."""
     lines: List[KaraokeLine] = []
     if not ttml_content or "<tt" not in ttml_content:
         return lines
 
+    root: Optional[ET.Element] = None
     try:
-        # Strip XML namespaces for simplified element matching
-        xml_clean = re.sub(r'\sxmlns(?::\w+)?="[^"]*"', '', ttml_content)
-        root = ET.fromstring(xml_clean)
+        # Standard XML parse (preserves all declared namespaces)
+        root = ET.fromstring(ttml_content)
     except Exception:
-        # Fallback regex parsing if XML is malformed
-        p_matches = re.findall(r'<p\b([^>]*)>(.*?)</p>', ttml_content, re.DOTALL | re.IGNORECASE)
-        for attrs, body in p_matches:
-            begin_m = re.search(r'begin="([^"]+)"', attrs)
-            end_m = re.search(r'end="([^"]+)"', attrs)
-            start_s = parse_time_str_to_seconds(begin_m.group(1)) if begin_m else None
-            end_s = parse_time_str_to_seconds(end_m.group(1)) if end_m else None
+        try:
+            # If standard parse fails (e.g. undeclared namespace prefix),
+            # safely strip namespaces and namespace prefixes from tags and attributes
+            t = re.sub(r'\sxmlns(?::[a-zA-Z0-9_-]+)?="[^"]*"', '', ttml_content)
+            t = re.sub(r'\s[a-zA-Z0-9_-]+:([a-zA-Z0-9_-]+=)', r' \1', t)
+            t = re.sub(r'<(/)?([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)', r'<\1\3', t)
+            root = ET.fromstring(t)
+        except Exception:
+            root = None
 
-            # Check for inner spans
-            spans = re.findall(r'<span\b([^>]*)>(.*?)</span>', body, re.DOTALL | re.IGNORECASE)
+    if root is not None:
+        p_elements = [el for el in root.iter() if el.tag.split("}")[-1].lower() == "p"]
+        for p in p_elements:
+            start_s = parse_time_str_to_seconds(_get_element_attr(p, "begin"))
+            end_s = parse_time_str_to_seconds(_get_element_attr(p, "end"))
+
+            raw_line_text = "".join(html.unescape(t) for t in p.itertext())
+            line_text = re.sub(r'\s+', ' ', raw_line_text).strip()
+
             words: List[KaraokeWord] = []
-            full_text_parts = []
-            for s_attrs, s_text in spans:
-                s_begin = re.search(r'begin="([^"]+)"', s_attrs)
-                s_end = re.search(r'end="([^"]+)"', s_attrs)
-                w_start = parse_time_str_to_seconds(s_begin.group(1)) if s_begin else start_s
-                w_end = parse_time_str_to_seconds(s_end.group(1)) if s_end else end_s
-                clean_w = re.sub(r'<[^>]+>', '', s_text)
-                if clean_w:
-                    full_text_parts.append(clean_w)
-                    if w_start is not None and w_end is not None:
-                        words.append(KaraokeWord(text=clean_w, start=w_start, end=w_end))
+            timed_spans = [
+                s for s in p.iter()
+                if s.tag.split("}")[-1].lower() == "span" and _get_element_attr(s, "begin")
+            ]
 
-            line_text = "".join(full_text_parts) if full_text_parts else re.sub(r'<[^>]+>', '', body).strip()
+            if timed_spans:
+                for idx, span in enumerate(timed_spans):
+                    raw_w_text = html.unescape("".join(span.itertext()))
+                    w_text = raw_w_text.strip()
+                    if not w_text:
+                        continue
+                    w_start = parse_time_str_to_seconds(_get_element_attr(span, "begin")) or start_s
+                    w_end = parse_time_str_to_seconds(_get_element_attr(span, "end")) or end_s
+
+                    has_space_after = (
+                        raw_w_text.endswith(" ")
+                        or (span.tail and any(c.isspace() for c in span.tail))
+                    )
+                    if has_space_after and idx < len(timed_spans) - 1:
+                        w_text += " "
+
+                    if w_start is not None and w_end is not None:
+                        words.append(KaraokeWord(text=w_text, start=w_start, end=w_end))
+
             if line_text:
                 lines.append(KaraokeLine(
                     text=line_text,
@@ -98,37 +128,40 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
                     end=end_s,
                     words=words if words else None,
                 ))
-        return lines
+    else:
+        # Fallback regex parsing if XML is completely malformed
+        p_matches = re.findall(r'<p\b([^>]*)>(.*?)</p>', ttml_content, re.DOTALL | re.IGNORECASE)
+        for attrs, body in p_matches:
+            begin_m = re.search(r'begin="([^"]+)"', attrs)
+            end_m = re.search(r'end="([^"]+)"', attrs)
+            start_s = parse_time_str_to_seconds(begin_m.group(1)) if begin_m else None
+            end_s = parse_time_str_to_seconds(end_m.group(1)) if end_m else None
 
-    for p in root.iter("p"):
-        start_s = parse_time_str_to_seconds(p.attrib.get("begin", ""))
-        end_s = parse_time_str_to_seconds(p.attrib.get("end", ""))
+            raw_text = re.sub(r'<[^>]+>', ' ', body)
+            line_text = re.sub(r'\s+', ' ', html.unescape(raw_text)).strip()
 
-        words: List[KaraokeWord] = []
-        spans = list(p.iter("span"))
+            spans = re.findall(r'<span\b([^>]*)>(.*?)</span>', body, re.DOTALL | re.IGNORECASE)
+            words: List[KaraokeWord] = []
+            if spans:
+                for idx, (s_attrs, s_text) in enumerate(spans):
+                    s_begin = re.search(r'begin="([^"]+)"', s_attrs)
+                    s_end = re.search(r'end="([^"]+)"', s_attrs)
+                    w_start = parse_time_str_to_seconds(s_begin.group(1)) if s_begin else start_s
+                    w_end = parse_time_str_to_seconds(s_end.group(1)) if s_end else end_s
+                    clean_w = re.sub(r'<[^>]+>', '', s_text)
+                    w_text = html.unescape(clean_w).strip()
+                    if w_text and w_start is not None and w_end is not None:
+                        if idx < len(spans) - 1:
+                            w_text += " "
+                        words.append(KaraokeWord(text=w_text, start=w_start, end=w_end))
 
-        if spans:
-            full_text_parts = []
-            for span in spans:
-                text = (span.text or "") + (span.tail or "")
-                if not text:
-                    continue
-                w_start = parse_time_str_to_seconds(span.attrib.get("begin", "")) or start_s
-                w_end = parse_time_str_to_seconds(span.attrib.get("end", "")) or end_s
-                full_text_parts.append(text)
-                if w_start is not None and w_end is not None:
-                    words.append(KaraokeWord(text=text, start=w_start, end=w_end))
-            line_text = "".join(full_text_parts).strip()
-        else:
-            line_text = "".join(p.itertext()).strip()
-
-        if line_text:
-            lines.append(KaraokeLine(
-                text=line_text,
-                start=start_s,
-                end=end_s,
-                words=words if words else None,
-            ))
+            if line_text:
+                lines.append(KaraokeLine(
+                    text=line_text,
+                    start=start_s,
+                    end=end_s,
+                    words=words if words else None,
+                ))
 
     # Auto-fill missing line ends based on next line starts
     for i in range(len(lines) - 1):

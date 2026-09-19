@@ -30,9 +30,14 @@
 
 - **Flexible Storage & Audio Tag Writing (Embedded Lyrics):**
   - **Sidecar files:** Atomic saving of companion files (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) with quality resolution order (`.ttml` > `.yaml` > `.lrc`).
+  - **Enhanced LRC & Word/Syllable Karaoke Timing:**
+    - When word-level timing is found (TTML, Lyricsfile YAML), the aggregator embeds **Enhanced LRC (ELRC)** with `<mm:ss.xx>` word timestamps into the `LYRICS` / `USLT` tags.
+    - Enables smooth word-by-word karaoke animations in **Feishin** (via OpenSubsonic Song Lyrics v2) and **Symfonium**.
+    - Stores raw Apple Music XML in the `LYRICS_TTML` Vorbis tag for advanced clients.
+    - Emits word-level millisecond timestamps in ID3 `SYLT` frames for MP3.
   - **Embedded Audio Tags:** Safe, non-destructive embedding into audio metadata via `mutagen`:
-    - **MP3 (ID3v2.4):** `USLT` (synced/plain lyrics for Symfonium, Poweramp, foobar2000), `SYLT` (millisecond-accurate karaoke timing), and `TXXX:LYRICS`.
-    - **FLAC, OGG, Opus:** Vorbis comments `LYRICS` and `UNSYNCEDLYRICS`.
+    - **MP3 (ID3v2.4):** `USLT` (Enhanced LRC/plain text), `SYLT` (millisecond-accurate karaoke timing), and `TXXX:LYRICS`.
+    - **FLAC, OGG, Opus:** Vorbis comments `LYRICS` (Enhanced LRC), `UNSYNCEDLYRICS`, and `LYRICS_TTML`.
     - **M4A / MP4 / ALAC:** QuickTime/Apple atom `©lyr` (`\xa9lyr`).
   - **Storage mode selection (`--storage-mode`):** `sidecar` (default), `embedded` (tags only), or `both`.
   - **Custom destination directory (`--output-dir`):** Store sidecars in a separate, isolated folder outside the music directory.
@@ -192,6 +197,7 @@ min_similarity_score: 0.75
 
 # Storage settings
 storage_mode: "both"     # "sidecar", "embedded", or "both"
+embed_word_sync: true    # Embed Enhanced LRC (<mm:ss.xx>) and SYLT word-level timestamps for Feishin/Symfonium
 output_dir: null         # Optional custom destination folder for sidecars
 overwrite: false
 upgrade_quality: true
@@ -227,6 +233,7 @@ enabled_providers:
 All parameters can also be configured using environment variables with the `NLA_` prefix (see [.env.example](.env.example)):
 - `MUSIC_DIR` or `NLA_MUSIC_DIR` – Path to audio collection directory
 - `NLA_STORAGE_MODE` – Storage destination: `sidecar`, `embedded`, or `both`
+- `NLA_EMBED_WORD_SYNC` – Embed word-level timing (Enhanced LRC) into audio tags (`true`/`false`)
 - `NLA_OUTPUT_DIR` – Custom directory for sidecar files
 - `NLA_SCAN_INTERVAL` – Daemon scan interval (e.g. `1h`, `30m`, `3600s`)
 - `NLA_CONCURRENCY` – Max concurrent download tasks (default: `4`)
@@ -250,7 +257,7 @@ Run the complete test suite covering TTML/YAML/LRC parsers, audio tag reading/wr
 ```bash
 pytest
 ```
-*88 unit tests passing (100% test coverage for all core components).*
+*99 unit tests passing (100% test coverage for all core components).*
 
 ---
 

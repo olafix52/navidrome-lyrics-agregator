@@ -70,6 +70,10 @@ class AppConfig(BaseModel):
         default="sidecar",
         description="Lyrics storage destination: 'sidecar' (companion files), 'embedded' (audio tags), or 'both'",
     )
+    embed_word_sync: bool = Field(
+        default=True,
+        description="Embed word/syllable-level timing (Enhanced LRC <mm:ss.xx> and SYLT words) into audio tags when available",
+    )
     overwrite: bool = Field(default=False, description="Force overwrite existing lyrics sidecar files or tags")
     upgrade_quality: bool = Field(default=True, description="Upgrade from LRC to TTML/YAML if higher quality is found")
     dry_run: bool = Field(default=False, description="Scan and search without writing files to disk")
@@ -162,6 +166,8 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "NLA_LOG_FILE": "log_file",
         "NLA_STORAGE_MODE": "storage_mode",
         "STORAGE_MODE": "storage_mode",
+        "NLA_EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
+        "EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
         "OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
     }

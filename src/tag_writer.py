@@ -1,5 +1,6 @@
 """Audio tag writer embedding synchronized (USLT/SYLT, Vorbis, ©lyr) and plain lyrics into audio files."""
 
+import html
 import logging
 import re
 from pathlib import Path
@@ -18,40 +19,62 @@ from src.web.parser import KaraokeLine, parse_lyrics_to_karaoke
 logger = logging.getLogger("nla.tag_writer")
 
 
-def _karaoke_lines_to_lrc(lines: List[KaraokeLine]) -> str:
-    """Serialize KaraokeLine list back to standard LRC string with [mm:ss.xx] timestamps."""
+def _karaoke_lines_to_lrc(lines: List[KaraokeLine], enhanced: bool = True) -> str:
+    """Serialize KaraokeLine list back to standard or Enhanced LRC string with [mm:ss.xx] timestamps.
+    
+    If enhanced is True and line.words is present, serializes word-level timing <mm:ss.xx> for karaoke players.
+    """
     out: List[str] = []
     for line in lines:
         if line.start is not None:
             m = int(line.start // 60)
             s = line.start % 60
-            out.append(f"[{m:02d}:{s:05.2f}]{line.text}")
+            if enhanced and line.words and len(line.words) > 0:
+                word_parts = []
+                for w in line.words:
+                    wm = int(w.start // 60)
+                    ws = w.start % 60
+                    w_text = html.unescape(w.text)
+                    word_parts.append(f"<{wm:02d}:{ws:05.2f}>{w_text}")
+                out.append(f"[{m:02d}:{s:05.2f}]" + "".join(word_parts))
+            else:
+                text = html.unescape(line.text.strip()) if line.text else ""
+                out.append(f"[{m:02d}:{s:05.2f}]{text}")
         else:
-            out.append(line.text)
+            text = html.unescape(line.text.strip()) if line.text else ""
+            out.append(text)
     return "\n".join(out)
 
 
 def _karaoke_lines_to_plain(lines: List[KaraokeLine]) -> str:
     """Extract clean unsynced lyrics text without any timestamps."""
-    return "\n".join(line.text.strip() for line in lines if line.text.strip())
+    return "\n".join(html.unescape(line.text.strip()) for line in lines if line.text and line.text.strip())
 
 
-def _lyrics_to_tag_payloads(lyrics: LyricsResult) -> Tuple[str, str, List[Tuple[str, int]]]:
+def _lyrics_to_tag_payloads(
+    lyrics: LyricsResult,
+    enhanced_lrc: bool = True,
+) -> Tuple[str, str, List[Tuple[str, int]]]:
     """Convert LyricsResult into:
-    1. lrc_text: Synced LRC string (or plain text if unsynced)
+    1. lrc_text: Synced LRC string (Enhanced LRC if word-sync available, or plain text if unsynced)
     2. plain_text: Unsynced plain text
     3. sylt_entries: List of (line_or_word, timestamp_ms) for ID3 SYLT frame
     """
     lines = parse_lyrics_to_karaoke(lyrics.content, lyrics.format)
 
-    lrc_text = _karaoke_lines_to_lrc(lines) if lyrics.is_synced else _karaoke_lines_to_plain(lines)
+    lrc_text = _karaoke_lines_to_lrc(lines, enhanced=enhanced_lrc) if lyrics.is_synced else _karaoke_lines_to_plain(lines)
     plain_text = _karaoke_lines_to_plain(lines)
 
     sylt_entries: List[Tuple[str, int]] = []
     if lyrics.is_synced:
         for line in lines:
-            if line.start is not None and line.text.strip():
-                sylt_entries.append((line.text.strip(), int(round(line.start * 1000))))
+            if enhanced_lrc and line.words and len(line.words) > 0:
+                for w in line.words:
+                    if w.text:
+                        sylt_entries.append((html.unescape(w.text), int(round(w.start * 1000))))
+            elif line.start is not None and line.text and line.text.strip():
+                clean_line = html.unescape(line.text.strip())
+                sylt_entries.append((clean_line, int(round(line.start * 1000))))
 
     return lrc_text, plain_text, sylt_entries
 
@@ -174,13 +197,14 @@ def embed_lyrics_in_audio(
     audio_path: Path,
     lyrics: LyricsResult,
     dry_run: bool = False,
+    enhanced_lrc: bool = True,
 ) -> bool:
     """Embed lyrics into audio metadata tags based on file format.
     
     Supports:
-    - MP3: USLT, SYLT, TXXX:LYRICS (ID3v2.4)
-    - FLAC: LYRICS & UNSYNCEDLYRICS (Vorbis comments)
-    - OGG / Opus: LYRICS (Vorbis comments)
+    - MP3: USLT (Enhanced LRC), SYLT (word-level timestamps), TXXX:LYRICS (ID3v2.4)
+    - FLAC: LYRICS (Enhanced LRC), UNSYNCEDLYRICS & LYRICS_TTML (Vorbis comments)
+    - OGG / Opus: LYRICS (Enhanced LRC) & UNSYNCEDLYRICS (Vorbis comments)
     - M4A / MP4 / ALAC: ©lyr atom
     
     Returns True if successfully written (or simulated in dry_run).
@@ -190,7 +214,7 @@ def embed_lyrics_in_audio(
         return False
 
     suffix = audio_path.suffix.lower()
-    lrc_text, plain_text, sylt_entries = _lyrics_to_tag_payloads(lyrics)
+    lrc_text, plain_text, sylt_entries = _lyrics_to_tag_payloads(lyrics, enhanced_lrc=enhanced_lrc)
 
     if dry_run:
         logger.info(f"[DRY RUN] Would embed {lyrics.sync_type.value} lyrics in {audio_path.name}")
@@ -204,7 +228,7 @@ def embed_lyrics_in_audio(
             except ID3NoHeaderError:
                 tags = ID3()
 
-            # Set USLT (unsynced or standard LRC string for mobile players like Symfonium / Poweramp)
+            # Set USLT (unsynced or standard/Enhanced LRC string for mobile players like Symfonium / Feishin)
             tags.delall("USLT")
             tags.add(
                 USLT(
@@ -243,6 +267,8 @@ def embed_lyrics_in_audio(
             audio["LYRICS"] = lrc_text
             if plain_text and plain_text != lrc_text:
                 audio["UNSYNCEDLYRICS"] = plain_text
+            if lyrics.format == LyricsFormat.TTML and lyrics.content:
+                audio["LYRICS_TTML"] = lyrics.content
             audio.save()
             logger.debug(f"Embedded Vorbis LYRICS in {audio_path.name}")
             return True
@@ -254,6 +280,8 @@ def embed_lyrics_in_audio(
                 audio.tags["LYRICS"] = [lrc_text]
                 if plain_text and plain_text != lrc_text:
                     audio.tags["UNSYNCEDLYRICS"] = [plain_text]
+                if lyrics.format == LyricsFormat.TTML and lyrics.content:
+                    audio.tags["LYRICS_TTML"] = [lyrics.content]
                 audio.save()
                 logger.debug(f"Embedded OGG/Opus LYRICS in {audio_path.name}")
                 return True

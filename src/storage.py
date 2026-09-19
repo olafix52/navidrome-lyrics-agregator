@@ -158,6 +158,7 @@ def save_lyrics_for_track(
     output_dir: Optional[Path] = None,
     dry_run: bool = False,
     remove_lower_quality: bool = True,
+    enhanced_lrc: bool = True,
 ) -> Tuple[Optional[Path], bool]:
     """Save lyrics according to the configured storage mode: sidecar, embedded, or both.
     
@@ -185,6 +186,7 @@ def save_lyrics_for_track(
                 audio_path=audio_path,
                 lyrics=lyrics,
                 dry_run=dry_run,
+                enhanced_lrc=enhanced_lrc,
             )
         else:
             logger.debug(f"Audio file {audio_path} not found locally for tag embedding")

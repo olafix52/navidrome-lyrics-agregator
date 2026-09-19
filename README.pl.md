@@ -30,9 +30,14 @@
 
 - **Elastyczne przechowywanie i zapis w tagach audio (Embedded Lyrics):**
   - **Pliki sidecar:** Atomowy zapis plików towarzyszących (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) z hierarchią jakości (`.ttml` > `.yaml` > `.lrc`).
+  - **Enhanced LRC & synchronizacja słowna/sylabowa karaoke:**
+    - Jeśli dostępne są znaczniki czasowe na poziomie słów (TTML, Lyricsfile YAML), agregator osadza format **Enhanced LRC (ELRC)** ze znacznikami `<mm:ss.xx>` dla każdego słowa wewnątrz tagów `LYRICS` / `USLT`.
+    - Umożliwia to płynną animację karaoke słowo po słowie w **Feishin** (poprzez protokół OpenSubsonic Song Lyrics v2) oraz w **Symfonium**.
+    - Zapisuje surowy XML Apple Music w tagu Vorbis `LYRICS_TTML` dla zaawansowanych klientów.
+    - Generuje znaczniki słowne z dokładnością milisekundową w ramkach ID3 `SYLT` dla plików MP3.
   - **Osadzanie w tagach audio:** Bezpieczny, bezstratny zapis metadanych przez `mutagen`:
-    - **MP3 (ID3v2.4):** Ramki `USLT` (tekst zsynchronizowany/zwykły dla Symfonium, Poweramp, foobar2000), `SYLT` (milisekundowa synchronizacja karaoke) oraz `TXXX:LYRICS`.
-    - **FLAC, OGG, Opus:** Komentarze Vorbis `LYRICS` oraz `UNSYNCEDLYRICS`.
+    - **MP3 (ID3v2.4):** Ramki `USLT` (Enhanced LRC / zwykły tekst), `SYLT` (milisekundowa synchronizacja karaoke) oraz `TXXX:LYRICS`.
+    - **FLAC, OGG, Opus:** Komentarze Vorbis `LYRICS` (Enhanced LRC), `UNSYNCEDLYRICS` oraz `LYRICS_TTML`.
     - **M4A / MP4 / ALAC:** Atom QuickTime/Apple `©lyr` (`\xa9lyr`).
   - **Wybór trybu (`--storage-mode`):** `sidecar` (domyślny), `embedded` (wyłącznie tagi) lub `both` (jednocześnie pliki sidecar i tagi).
   - **Katalog wyjściowy (`--output-dir`):** Zapisywanie plików tekstów w wyodrębnionym folderze poza katalogiem muzyki.
@@ -192,6 +197,7 @@ min_similarity_score: 0.75
 
 # Ustawienia zapisu tekstów
 storage_mode: "both"     # "sidecar", "embedded" lub "both"
+embed_word_sync: true    # Zapis Enhanced LRC (<mm:ss.xx>) oraz znaczników słownych SYLT dla Feishin/Symfonium
 output_dir: null         # Opcjonalny dedykowany folder na pliki tekstów
 overwrite: false
 upgrade_quality: true
@@ -227,6 +233,7 @@ enabled_providers:
 Wszystkie opcje można również przekazać za pomocą zmiennych środowiskowych z przedrostkiem `NLA_`:
 - `MUSIC_DIR` lub `NLA_MUSIC_DIR` – Ścieżka do katalogu z muzyką
 - `NLA_STORAGE_MODE` – Tryb zapisu: `sidecar`, `embedded` lub `both`
+- `NLA_EMBED_WORD_SYNC` – Osadzanie synchronizacji słownej (Enhanced LRC) w tagach audio (`true`/`false`)
 - `NLA_OUTPUT_DIR` – Dedykowany folder na pliki tekstów
 - `NLA_SCAN_INTERVAL` – Częstotliwość skanowania w trybie demona (`1h`, `30m`, `3600s`)
 - `NLA_CONCURRENCY` – Liczba współbieżnych zadań (domyślnie: `4`)
@@ -250,7 +257,7 @@ Uruchomienie pełnego pakietu testów:
 ```bash
 pytest
 ```
-*88 testów jednostkowych (100% testów zdanych).*
+*99 testów jednostkowych (100% testów zdanych).*
 
 ---
 
