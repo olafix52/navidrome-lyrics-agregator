@@ -405,3 +405,98 @@ async def test_api_lyrics_ttml_content(tmp_path: Path):
         assert "<tt" in data["ttml_content"]
         assert 'begin="00:10.000"' in data["ttml_content"]
 
+
+@pytest.mark.asyncio
+async def test_api_lyrics_attribution(tmp_path: Path):
+    """Verify GET /api/tracks/{id}/lyrics returns attribution metadata for TTML and LRC tracks."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+
+    # Track with TTML containing attribution
+    ttml_audio = music_dir / "Song.mp3"
+    ttml_audio.write_bytes(b"audio-data")
+    ttml_file = music_dir / "Song.ttml"
+    ttml_file.write_text("""<?xml version="1.0" encoding="utf-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+  <head>
+    <metadata>
+      <ttm:copyright>Lyrics provided by Spicy Lyrics · Synced by JohnDoe (https://spicylyrics.org/user/1)</ttm:copyright>
+      <attribution provider="Spicy Lyrics" source="spicy_lyrics">
+        <maker username="JohnDoe" url="https://spicylyrics.org/user/1" id="1"/>
+      </attribution>
+    </metadata>
+  </head>
+  <body>
+    <div>
+      <p begin="00:01.000" end="00:02.000"><span>Test</span></p>
+    </div>
+  </body>
+</tt>""", encoding="utf-8")
+
+    config = AppConfig(music_dir=music_dir)
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        track_id = encode_track_id(ttml_audio, music_dir)
+        res = await client.get(f"/api/tracks/{track_id}/lyrics")
+        assert res.status_code == 200
+        data = res.json()
+        assert "attribution" in data
+        attr = data["attribution"]
+        assert attr["provider"] == "Spicy Lyrics"
+        assert attr["source"] == "spicy_lyrics"
+        assert attr["maker"]["username"] == "JohnDoe"
+        assert attr["maker"]["url"] == "https://spicylyrics.org/user/1"
+
+
+@pytest.mark.asyncio
+async def test_api_get_and_update_providers(tmp_path: Path):
+    """Verify GET /api/providers and POST /api/providers dynamically manage provider cascade."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+
+    config = AppConfig(music_dir=music_dir, enabled_providers=["spicylyrics", "amll", "lrclib"])
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. GET /api/providers
+        res = await client.get("/api/providers")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["total"] == 14
+        assert data["enabled_count"] == 3
+        providers = data["providers"]
+        assert len(providers) == 14
+        assert providers[0]["id"] == "spicylyrics"
+        assert providers[0]["enabled"] is True
+        assert providers[0]["priority"] == 1
+
+        # 2. POST /api/providers (reorder and toggle)
+        post_res = await client.post(
+            "/api/providers",
+            json={"enabled_providers": ["lrclib", "spicylyrics"], "persist": False},
+        )
+        assert post_res.status_code == 200
+        post_data = post_res.json()
+        assert post_data["success"] is True
+        assert post_data["enabled_providers"] == ["lrclib", "spicylyrics"]
+
+        # Verify app internal state and cascade rebuilt
+        assert app.state.config.enabled_providers == ["lrclib", "spicylyrics"]
+        assert len(app.state.matcher.providers) == 2
+        assert app.state.matcher.providers[0].name == "lrclib"
+        assert app.state.matcher.providers[1].name == "spicylyrics"
+
+        # Verify subsequent GET /api/providers reflects updated active state
+        res2 = await client.get("/api/providers")
+        assert res2.status_code == 200
+        data2 = res2.json()
+        assert data2["enabled_count"] == 2
+        assert data2["providers"][0]["id"] == "lrclib"
+        assert data2["providers"][0]["enabled"] is True
+        assert data2["providers"][1]["id"] == "spicylyrics"
+        assert data2["providers"][1]["enabled"] is True
+        assert data2["providers"][2]["enabled"] is False
+
+
+

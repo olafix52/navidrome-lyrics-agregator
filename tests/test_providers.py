@@ -978,13 +978,64 @@ async def test_spicylyrics_provider_syllable(sample_track):
         assert result.provider_name == "spicylyrics"
         assert result.duration == 354.0
         assert result.metadata["source"] == "apple_music"
+        assert result.metadata["provider"] == "Spicy Lyrics"
         assert result.metadata["spotify_id"] == "4cOdK2wGLETKBW3PvgPWqT"
         assert result.metadata["songwriters"] == ["Freddie Mercury"]
+        # Commercial source: provider only, no maker/uploader elements
+        assert "<ttm:copyright>Lyrics provided by Spicy Lyrics (Apple Music)</ttm:copyright>" in result.content
+        assert '<attribution provider="Spicy Lyrics" source="apple_music" />' in result.content
+        assert "<maker" not in result.content
+        assert "<uploader" not in result.content
         # Multi-syllable word 'Fa-ther': 'Fa' has no trailing space, 'ther ' has trailing space, zero whitespace between spans
         assert '<span begin="00:01.000" end="00:01.500">Fa</span><span begin="00:01.600" end="00:02.000">ther </span>' in result.content
         # Background vocal enclosed in <span ttm:role="x-bg"> with child spans wrapped in parentheses
         assert '<span ttm:role="x-bg"' in result.content
         assert '<span begin="00:02.600" end="00:02.800">(re</span><span begin="00:02.800" end="00:03.000">al)</span>' in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_community_attribution(sample_track):
+    sample_track.spotify_id = "4cOdK2wGLETKBW3PvgPWqT"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Syllable",
+            "source": "spicy_lyrics",
+            "UploadAttribution": {
+                "Maker": {"username": "CoolMaker", "url": "https://spicylyrics.org/user/10", "id": 10},
+                "Uploader": {"username": "CoolUploader", "url": "https://spicylyrics.org/user/20", "id": 20},
+            },
+            "SongWriters": ["Freddie Mercury"],
+            "EndTime": 354.0,
+            "Content": [
+                {
+                    "Lead": {
+                        "StartTime": 1.0,
+                        "EndTime": 3.0,
+                        "Syllables": [
+                            {"Text": "Hello ", "StartTime": 1.0, "EndTime": 3.0, "IsPartOfWord": False},
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.metadata["provider"] == "Spicy Lyrics"
+        assert result.metadata["source"] == "spicy_lyrics"
+        # Community source: copyright and structured attribution contain Maker and Uploader
+        assert "Lyrics provided by Spicy Lyrics · Synced by CoolMaker (https://spicylyrics.org/user/10) · Uploaded by CoolUploader (https://spicylyrics.org/user/20)" in result.content
+        assert '<attribution provider="Spicy Lyrics" source="spicy_lyrics">' in result.content
+        assert '<maker username="CoolMaker" id="10" url="https://spicylyrics.org/user/10" />' in result.content
+        assert '<uploader username="CoolUploader" id="20" url="https://spicylyrics.org/user/20" />' in result.content
 
 
 @pytest.mark.asyncio

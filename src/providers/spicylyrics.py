@@ -236,7 +236,15 @@ class SpicyLyricsProvider(BaseLyricsProvider):
             if not ttml_lines:
                 return None
 
-            ttml_content = build_ttml(ttml_lines, title=track.title, artist=track.artist)
+            ttml_content = build_ttml(
+                ttml_lines,
+                title=track.title,
+                artist=track.artist,
+                provider="Spicy Lyrics",
+                source=source,
+                attribution=attribution if isinstance(attribution, dict) else None,
+                songwriters=songwriters if isinstance(songwriters, list) else None,
+            )
             return LyricsResult(
                 content=ttml_content,
                 format=LyricsFormat.TTML,
@@ -246,6 +254,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
                 title=track.title,
                 artist=track.artist,
                 metadata={
+                    "provider": "Spicy Lyrics",
                     "source": source,
                     "spotify_id": track_id,
                     "attribution": attribution,
@@ -272,8 +281,26 @@ class SpicyLyricsProvider(BaseLyricsProvider):
             if not lrc_lines:
                 return None
 
+            lrc_header_lines: List[str] = []
+            if source and source != "unknown":
+                lrc_header_lines.append(f"# Provider: Spicy Lyrics ({source})")
+            else:
+                lrc_header_lines.append("# Provider: Spicy Lyrics")
+
+            if isinstance(attribution, dict):
+                maker = attribution.get("Maker", {})
+                uploader = attribution.get("Uploader", {})
+                if maker.get("username"):
+                    maker_str = maker["username"] + (f" ({maker['url']})" if maker.get("url") else "")
+                    lrc_header_lines.append(f"# Synced by: {maker_str}")
+                if uploader.get("username"):
+                    uploader_str = uploader["username"] + (f" ({uploader['url']})" if uploader.get("url") else "")
+                    lrc_header_lines.append(f"# Uploaded by: {uploader_str}")
+
+            full_lrc = "\n".join(lrc_header_lines + lrc_lines) if lrc_header_lines else "\n".join(lrc_lines)
+
             return LyricsResult(
-                content="\n".join(lrc_lines),
+                content=full_lrc,
                 format=LyricsFormat.LRC,
                 sync_type=LyricsSyncType.LINE_SYNC,
                 provider_name=self.name,
@@ -281,6 +308,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
                 title=track.title,
                 artist=track.artist,
                 metadata={
+                    "provider": "Spicy Lyrics",
                     "source": source,
                     "spotify_id": track_id,
                     "attribution": attribution,

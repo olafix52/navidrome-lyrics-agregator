@@ -54,6 +54,11 @@ class SaveLyricsRequest(BaseModel):
     provider: Optional[str] = "manual"
 
 
+class UpdateProvidersRequest(BaseModel):
+    enabled_providers: List[str]
+    persist: Optional[bool] = True
+
+
 def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> FastAPI:
     """Create and configure the FastAPI web application."""
     app = FastAPI(
@@ -260,6 +265,59 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
         else:
             ttml_content = karaoke_to_ttml(karaoke_lines, title=track_title, artist=track_artist)
 
+        attribution_data: Dict[str, Any] = {
+            "provider": None,
+            "source": None,
+            "maker": None,
+            "uploader": None,
+            "copyright_text": None,
+            "songwriters": None,
+        }
+
+        if fmt == LyricsFormat.TTML or "<tt" in content:
+            try:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(content)
+                attr_el = next((el for el in root.iter() if el.tag.split("}")[-1].lower() == "attribution"), None)
+                copy_el = next((el for el in root.iter() if el.tag.split("}")[-1].lower() == "copyright"), None)
+                sw_elements = [el.text.strip() for el in root.iter() if el.tag.split("}")[-1].lower() == "songwriter" and el.text]
+
+                if attr_el is not None:
+                    attribution_data["provider"] = attr_el.attrib.get("provider")
+                    attribution_data["source"] = attr_el.attrib.get("source")
+                    for ch in attr_el:
+                        t = ch.tag.split("}")[-1].lower()
+                        if t == "maker":
+                            attribution_data["maker"] = {
+                                "username": ch.attrib.get("username", ""),
+                                "url": ch.attrib.get("url", ""),
+                                "id": ch.attrib.get("id", ""),
+                            }
+                        elif t == "uploader":
+                            attribution_data["uploader"] = {
+                                "username": ch.attrib.get("username", ""),
+                                "url": ch.attrib.get("url", ""),
+                                "id": ch.attrib.get("id", ""),
+                            }
+
+                if copy_el is not None and copy_el.text:
+                    attribution_data["copyright_text"] = copy_el.text.strip()
+                if sw_elements:
+                    attribution_data["songwriters"] = sw_elements
+            except Exception:
+                pass
+        elif fmt == LyricsFormat.LRC:
+            for line in content.splitlines()[:15]:
+                line_s = line.strip()
+                if line_s.startswith("# Provider:"):
+                    attribution_data["provider"] = line_s.replace("# Provider:", "").strip()
+                elif line_s.startswith("# Synced by:"):
+                    raw = line_s.replace("# Synced by:", "").strip()
+                    attribution_data["maker"] = {"username": raw}
+                elif line_s.startswith("# Uploaded by:"):
+                    raw = line_s.replace("# Uploaded by:", "").strip()
+                    attribution_data["uploader"] = {"username": raw}
+
         return {
             "has_lyrics": True,
             "format": fmt.value,
@@ -267,6 +325,7 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
             "filename": lyrics_path.name,
             "content": content,
             "ttml_content": ttml_content,
+            "attribution": attribution_data,
             "lines": [line.model_dump() for line in karaoke_lines],
             "track": {
                 "artist": track_artist,
@@ -382,7 +441,87 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
             "sync_type": sync_type.value,
         }
 
-    # 7. SERVE STATIC ASSETS AND SPA INDEX
+    # 7. API PROVIDERS MANAGEMENT
+    @app.get("/api/providers")
+    async def get_providers():
+        """Get all lyrics providers, their status, cascade priority, and metadata."""
+        from src.providers import AVAILABLE_PROVIDERS, PROVIDER_METADATA
+
+        enabled_set = set(p.lower() for p in app.state.config.enabled_providers)
+        result: List[Dict[str, Any]] = []
+
+        # 1. Enabled providers in cascade priority order
+        priority = 1
+        for p_id in app.state.config.enabled_providers:
+            p_lower = p_id.lower()
+            meta = PROVIDER_METADATA.get(p_lower, {})
+            result.append({
+                "id": p_lower,
+                "name": meta.get("name", p_id),
+                "description": meta.get("description", ""),
+                "formats": meta.get("formats", ["LRC (Line-sync)"]),
+                "requires_api_key": meta.get("requires_api_key", False),
+                "enabled": True,
+                "priority": priority,
+            })
+            priority += 1
+
+        # 2. Disabled providers
+        for p_id in AVAILABLE_PROVIDERS:
+            if p_id not in enabled_set:
+                meta = PROVIDER_METADATA.get(p_id, {})
+                result.append({
+                    "id": p_id,
+                    "name": meta.get("name", p_id),
+                    "description": meta.get("description", ""),
+                    "formats": meta.get("formats", ["LRC (Line-sync)"]),
+                    "requires_api_key": meta.get("requires_api_key", False),
+                    "enabled": False,
+                    "priority": None,
+                })
+
+        return {
+            "providers": result,
+            "total": len(AVAILABLE_PROVIDERS),
+            "enabled_count": len(app.state.config.enabled_providers),
+        }
+
+    @app.post("/api/providers")
+    async def update_providers(req: UpdateProvidersRequest):
+        """Update active providers cascade priority and enabled state."""
+        from src.config import save_enabled_providers
+        from src.providers import AVAILABLE_PROVIDERS
+
+        clean_list = []
+        for p in req.enabled_providers:
+            p_lower = p.strip().lower()
+            if p_lower in AVAILABLE_PROVIDERS and p_lower not in clean_list:
+                clean_list.append(p_lower)
+
+        app.state.config.enabled_providers = clean_list
+
+        for p_id in AVAILABLE_PROVIDERS:
+            if p_id in app.state.config.providers:
+                app.state.config.providers[p_id].enabled = (p_id in clean_list)
+
+        providers = build_provider_cascade(app.state.config)
+        app.state.matcher = LyricsMatcher(app.state.config, providers)
+
+        saved_file = None
+        if req.persist:
+            try:
+                saved_path = save_enabled_providers(app.state.config.enabled_providers)
+                saved_file = str(saved_path)
+            except Exception as e:
+                logger.warning(f"Failed to persist enabled providers to file: {e}")
+
+        return {
+            "success": True,
+            "enabled_providers": app.state.config.enabled_providers,
+            "persisted_to": saved_file,
+        }
+
+    # 8. SERVE STATIC ASSETS AND SPA INDEX
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -390,7 +529,14 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
     async def serve_index():
         index_file = STATIC_DIR / "index.html"
         if index_file.exists():
-            return FileResponse(index_file)
+            return FileResponse(
+                index_file,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         return {"message": "Navidrome Lyrics Aggregator Web UI API is running."}
 
     return app

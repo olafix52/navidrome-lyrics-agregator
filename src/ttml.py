@@ -43,6 +43,10 @@ def build_ttml(
     lines: List[Dict[str, Any]],
     title: str = "",
     artist: str = "",
+    provider: Optional[str] = None,
+    source: Optional[str] = None,
+    attribution: Optional[Dict[str, Any]] = None,
+    songwriters: Optional[List[str]] = None,
 ) -> str:
     """Build Apple Music / AMLL compliant TTML document from timed lines and syllables.
 
@@ -71,6 +75,88 @@ def build_ttml(
     meta = ET.SubElement(head, "{http://www.w3.org/ns/ttml}metadata")
     if title:
         ET.SubElement(meta, "{http://www.w3.org/ns/ttml#metadata}title").text = title
+
+    # Build copyright / attribution string (Spicy Lyrics attribution compliance)
+    copyright_parts: List[str] = []
+    if provider:
+        p_name = "Spicy Lyrics" if provider.lower() == "spicylyrics" else provider
+        if source and source.lower() not in ("spicy_lyrics", "unknown"):
+            copyright_parts.append(f"Lyrics provided by {p_name} ({source.replace('_', ' ').title()})")
+        else:
+            copyright_parts.append(f"Lyrics provided by {p_name}")
+    elif source:
+        copyright_parts.append(f"Source: {source.replace('_', ' ').title()}")
+
+    is_community = not source or source.lower() in ("spicy_lyrics", "unknown")
+    if is_community and attribution and isinstance(attribution, dict):
+        maker = attribution.get("Maker")
+        uploader = attribution.get("Uploader")
+        if isinstance(maker, dict) and maker.get("username"):
+            m_text = maker["username"]
+            if maker.get("url"):
+                m_text += f" ({maker['url']})"
+            copyright_parts.append(f"Synced by {m_text}")
+        elif isinstance(maker, str) and maker.strip():
+            copyright_parts.append(f"Synced by {maker.strip()}")
+
+        if isinstance(uploader, dict) and uploader.get("username"):
+            u_text = uploader["username"]
+            if uploader.get("url"):
+                u_text += f" ({uploader['url']})"
+            copyright_parts.append(f"Uploaded by {u_text}")
+        elif isinstance(uploader, str) and uploader.strip():
+            copyright_parts.append(f"Uploaded by {uploader.strip()}")
+
+    if copyright_parts:
+        c_el = ET.SubElement(meta, "{http://www.w3.org/ns/ttml#metadata}copyright")
+        c_el.text = " · ".join(copyright_parts)
+
+    # Structured attribution node for player extraction
+    if provider or source or (is_community and attribution):
+        attr_attribs: Dict[str, str] = {}
+        if provider:
+            attr_attribs["provider"] = "Spicy Lyrics" if provider.lower() == "spicylyrics" else provider
+        if source:
+            attr_attribs["source"] = source
+        attr_el = ET.SubElement(meta, "attribution", attr_attribs)
+
+        if is_community and attribution and isinstance(attribution, dict):
+            maker = attribution.get("Maker")
+            if isinstance(maker, dict) and maker.get("username"):
+                m_el = ET.SubElement(attr_el, "maker")
+                m_el.set("username", str(maker["username"]))
+                if maker.get("id"):
+                    m_el.set("id", str(maker["id"]))
+                if maker.get("url"):
+                    m_el.set("url", str(maker["url"]))
+            elif isinstance(maker, str) and maker.strip():
+                m_el = ET.SubElement(attr_el, "maker")
+                m_el.set("username", maker.strip())
+
+            uploader = attribution.get("Uploader")
+            if isinstance(uploader, dict) and uploader.get("username"):
+                u_el = ET.SubElement(attr_el, "uploader")
+                u_el.set("username", str(uploader["username"]))
+                if uploader.get("id"):
+                    u_el.set("id", str(uploader["id"]))
+                if uploader.get("url"):
+                    u_el.set("url", str(uploader["url"]))
+            elif isinstance(uploader, str) and uploader.strip():
+                u_el = ET.SubElement(attr_el, "uploader")
+                u_el.set("username", uploader.strip())
+
+    # iTunes metadata (songwriters)
+    itunes_meta = ET.SubElement(meta, "{http://music.apple.com/lyric-ttml-internal}iTunesMetadata")
+    sw_container = ET.SubElement(itunes_meta, "songwriters")
+    if songwriters and isinstance(songwriters, list):
+        for sw in songwriters:
+            if sw and str(sw).strip():
+                sw_el = ET.SubElement(sw_container, "songwriter")
+                sw_el.text = str(sw).strip()
+    elif artist:
+        sw_el = ET.SubElement(sw_container, "songwriter")
+        sw_el.text = artist
+
     has_v2 = any("v2" in line.get("agent", "") for line in lines)
     if has_v2:
         import re

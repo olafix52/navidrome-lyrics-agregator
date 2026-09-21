@@ -102,7 +102,7 @@ export class TTMLRenderer {
     return result;
   }
 
-  loadTTML(xmlString) {
+  loadTTML(xmlString, attributionData = null) {
     const container = this.container;
     if (!container) return;
 
@@ -386,6 +386,73 @@ export class TTMLRenderer {
       credit.className = "songwriter-credit";
       credit.textContent = "Autorzy / Twórcy: " + songwriters.join(", ");
       container.appendChild(credit);
+    }
+
+    // Attribution & Provider credit footer (Spicy Lyrics attribution compliance)
+    let provider = attributionData?.provider;
+    let source = attributionData?.source;
+    let maker = attributionData?.maker;
+    let uploader = attributionData?.uploader;
+    let copyrightText = attributionData?.copyright_text;
+
+    const attrEl = doc.getElementsByTagName("attribution")[0]
+      || Array.from(doc.getElementsByTagName("*")).find((e) => e.localName === "attribution");
+    if (attrEl) {
+      provider = attrEl.getAttribute("provider") || provider;
+      source = attrEl.getAttribute("source") || source;
+      const mEl = Array.from(attrEl.children).find((c) => c.localName === "maker");
+      if (mEl) {
+        maker = {
+          username: mEl.getAttribute("username") || "",
+          url: mEl.getAttribute("url") || "",
+        };
+      }
+      const uEl = Array.from(attrEl.children).find((c) => c.localName === "uploader");
+      if (uEl) {
+        uploader = {
+          username: uEl.getAttribute("username") || "",
+          url: uEl.getAttribute("url") || "",
+        };
+      }
+    }
+
+    if (!copyrightText) {
+      const copyEl = doc.getElementsByTagName("copyright")[0]
+        || doc.getElementsByTagName("ttm:copyright")[0]
+        || Array.from(doc.getElementsByTagName("*")).find((e) => e.localName === "copyright");
+      if (copyEl) copyrightText = copyEl.textContent.trim();
+    }
+
+    if (provider || copyrightText || source || maker || uploader) {
+      const attrContainer = document.createElement("div");
+      attrContainer.className = "lyrics-attribution";
+
+      const parts = [];
+      const pName = provider || "Spicy Lyrics";
+      if (source && source.toLowerCase() !== "spicy_lyrics" && source.toLowerCase() !== "unknown") {
+        const formattedSrc = source.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        parts.push(`<span class="attr-provider">Dostawca tekstu: <strong>${pName} (${formattedSrc})</strong></span>`);
+      } else {
+        parts.push(`<span class="attr-provider">Dostawca tekstu: <strong>${pName}</strong></span>`);
+      }
+
+      if (source === "spicy_lyrics" || (!source && (maker || uploader))) {
+        if (maker && maker.username) {
+          const mLabel = maker.url
+            ? `<a href="${maker.url}" target="_blank" rel="noopener noreferrer" class="attr-link">${maker.username}</a>`
+            : `<strong>${maker.username}</strong>`;
+          parts.push(`<span class="attr-maker">Synchronizacja: ${mLabel}</span>`);
+        }
+        if (uploader && uploader.username) {
+          const uLabel = uploader.url
+            ? `<a href="${uploader.url}" target="_blank" rel="noopener noreferrer" class="attr-link">${uploader.username}</a>`
+            : `<strong>${uploader.username}</strong>`;
+          parts.push(`<span class="attr-uploader">Przesłane przez: ${uLabel}</span>`);
+        }
+      }
+
+      attrContainer.innerHTML = parts.join(` <span class="attr-bullet">·</span> `);
+      container.appendChild(attrContainer);
     }
 
     this.state.isLoaded = true;

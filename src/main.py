@@ -362,13 +362,145 @@ async def run_web_command(args: argparse.Namespace, config) -> None:
     await server.serve()
 
 
+def run_providers_command(args, config: AppConfig, config_path: Optional[Path]) -> None:
+    """Handle the 'providers' CLI command for listing, enabling, and disabling providers."""
+    from rich.console import Console
+    from rich.table import Table
+    from src.config import save_enabled_providers
+    from src.providers import AVAILABLE_PROVIDERS, PROVIDER_METADATA
+
+    console = Console()
+    action = getattr(args, "provider_action", None) or "list"
+
+    if action == "list":
+        table = Table(
+            title="Lyrics Providers - Status & Cascade Priority",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("Priorytet", justify="center", style="bold")
+        table.add_column("ID", style="yellow")
+        table.add_column("Nazwa", style="white")
+        table.add_column("Status", justify="center")
+        table.add_column("Formaty", style="green")
+        table.add_column("Klucz API", justify="center")
+        table.add_column("Opis", style="dim")
+
+        enabled_set = set(p.lower() for p in config.enabled_providers)
+
+        # 1. Enabled providers in order
+        for idx, p_id in enumerate(config.enabled_providers, start=1):
+            meta = PROVIDER_METADATA.get(p_id, {})
+            name = meta.get("name", p_id)
+            fmts = ", ".join(meta.get("formats", [])) or "LRC/TTML"
+            req_key = "[yellow]Wymagany[/]" if meta.get("requires_api_key") else "[dim]Nie[/]"
+            desc = meta.get("description", "")
+            table.add_row(
+                str(idx),
+                p_id,
+                name,
+                "[bold green]✓ WŁĄCZONY[/]",
+                fmts,
+                req_key,
+                desc,
+            )
+
+        # 2. Disabled providers
+        for p_id in AVAILABLE_PROVIDERS:
+            if p_id not in enabled_set:
+                meta = PROVIDER_METADATA.get(p_id, {})
+                name = meta.get("name", p_id)
+                fmts = ", ".join(meta.get("formats", [])) or "LRC/TTML"
+                req_key = "[yellow]Wymagany[/]" if meta.get("requires_api_key") else "[dim]Nie[/]"
+                desc = meta.get("description", "")
+                table.add_row(
+                    "-",
+                    p_id,
+                    name,
+                    "[bold red]✗ WYŁĄCZONY[/]",
+                    fmts,
+                    req_key,
+                    desc,
+                )
+
+        console.print(table)
+        console.print(
+            f"\n[dim]Aktywnych dostawców:[/] [bold]{len(config.enabled_providers)}[/] / {len(AVAILABLE_PROVIDERS)}. "
+            f"[dim]Użyj [cyan]providers enable <id>[/] lub [cyan]providers disable <id>[/] aby zarządzać.[/]\n"
+        )
+        return
+
+    if action == "enable":
+        names_to_add = [n.strip().lower() for n in args.names]
+        changed = []
+        for n in names_to_add:
+            if n not in AVAILABLE_PROVIDERS:
+                console.print(f"[bold red]Błąd:[/] Nieznany provider: '{n}'. Dostępne: {', '.join(AVAILABLE_PROVIDERS.keys())}")
+                continue
+            if n not in config.enabled_providers:
+                config.enabled_providers.append(n)
+                changed.append(n)
+            if n in config.providers:
+                config.providers[n].enabled = True
+
+        if changed:
+            if not getattr(args, "no_save", False):
+                saved_to = save_enabled_providers(config.enabled_providers, config_path)
+                console.print(f"[bold green]Sukces![/] Włączono dostawców: {', '.join(changed)}. Zapisano w [cyan]{saved_to}[/].")
+            else:
+                console.print(f"[bold green]Sukces![/] Włączono dostawców (bez zapisu): {', '.join(changed)}.")
+        else:
+            console.print("[yellow]Wszyscy podani dostawcy byli już włączeni.[/]")
+
+    elif action == "disable":
+        names_to_remove = set(n.strip().lower() for n in args.names)
+        changed = []
+        new_enabled = []
+        for p in config.enabled_providers:
+            if p.lower() in names_to_remove:
+                changed.append(p)
+                if p.lower() in config.providers:
+                    config.providers[p.lower()].enabled = False
+            else:
+                new_enabled.append(p)
+
+        if changed:
+            config.enabled_providers = new_enabled
+            if not getattr(args, "no_save", False):
+                saved_to = save_enabled_providers(config.enabled_providers, config_path)
+                console.print(f"[bold green]Sukces![/] Wyłączono dostawców: {', '.join(changed)}. Zapisano w [cyan]{saved_to}[/].")
+            else:
+                console.print(f"[bold green]Sukces![/] Wyłączono dostawców (bez zapisu): {', '.join(changed)}.")
+        else:
+            console.print("[yellow]Żaden z podanych dostawców nie był aktywny.[/]")
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build command line argument parser."""
+    provider_parent = argparse.ArgumentParser(add_help=False)
+    provider_parent.add_argument(
+        "--providers", "-P",
+        type=str,
+        default=None,
+        help="Comma-separated list of enabled providers (e.g. 'spicylyrics,lrclib')",
+    )
+    provider_parent.add_argument(
+        "--disable-providers",
+        type=str,
+        default=None,
+        help="Comma-separated list of providers to disable (e.g. 'genius,lyricsify')",
+    )
+    provider_parent.add_argument(
+        "--enable-providers",
+        type=str,
+        default=None,
+        help="Comma-separated list of providers to enable",
+    )
+
     parser = argparse.ArgumentParser(
         prog="navidrome-lyrics-aggregator",
         description="Sidecar lyrics aggregator service for Navidrome music server",
+        parents=[provider_parent],
     )
     parser.add_argument(
         "-c", "--config",
@@ -391,7 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", help="Operational mode")
 
     # SCAN subcommand
-    scan_p = subparsers.add_parser("scan", help="Run a one-time scan of the music library")
+    scan_p = subparsers.add_parser("scan", parents=[provider_parent], help="Run a one-time scan of the music library")
     scan_p.add_argument("path", nargs="?", type=str, help="Target folder or file to scan (positional)")
     scan_p.add_argument("-t", "--target", type=str, help="Specific target folder or audio file to scan")
     scan_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
@@ -409,7 +541,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
 
     # DAEMON subcommand
-    daemon_p = subparsers.add_parser("daemon", help="Run in daemon mode with periodic scans")
+    daemon_p = subparsers.add_parser("daemon", parents=[provider_parent], help="Run in daemon mode with periodic scans")
     daemon_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     daemon_p.add_argument("-i", "--interval", type=str, help="Scan interval (e.g. '1h', '30m', '3600')")
     daemon_p.add_argument("-w", "--with-watch", action="store_true", help="Enable real-time watchdog along with periodic scans")
@@ -422,13 +554,13 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
 
     # WATCH subcommand
-    watch_p = subparsers.add_parser("watch", help="Watch music directory and fetch lyrics on file events")
+    watch_p = subparsers.add_parser("watch", parents=[provider_parent], help="Watch music directory and fetch lyrics on file events")
     watch_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     watch_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     watch_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
 
     # TEST-TRACK subcommand
-    test_p = subparsers.add_parser("test-track", help="Test query against all providers for a single track")
+    test_p = subparsers.add_parser("test-track", parents=[provider_parent], help="Test query against all providers for a single track")
     test_p.add_argument("-t", "--title", type=str, required=True, help="Track title")
     test_p.add_argument("-a", "--artist", type=str, required=True, help="Track artist")
     test_p.add_argument("--album", type=str, help="Track album name")
@@ -453,7 +585,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     # UPGRADE subcommand
-    upgrade_p = subparsers.add_parser("upgrade", help="Fetch word-sync TTML lyrics for tracks lacking them")
+    upgrade_p = subparsers.add_parser("upgrade", parents=[provider_parent], help="Fetch word-sync TTML lyrics for tracks lacking them")
     upgrade_p.add_argument("path", nargs="?", type=str, help="Target folder or file to upgrade (positional)")
     upgrade_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     upgrade_p.add_argument("--only-lrc", action="store_true", help="Only upgrade tracks that already have line-sync/plain lyrics")
@@ -491,11 +623,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     # WEB / DASHBOARD subcommand
     for cmd_name in ["web", "dashboard"]:
-        web_p = subparsers.add_parser(cmd_name, help="Launch lightweight Web UI dashboard and live karaoke player")
+        web_p = subparsers.add_parser(cmd_name, parents=[provider_parent], help="Launch lightweight Web UI dashboard and live karaoke player")
         web_p.add_argument("path", nargs="?", type=str, help="Root music directory (positional)")
         web_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
         web_p.add_argument("-p", "--port", type=int, default=8080, help="Web server port (default: 8080)")
         web_p.add_argument("--host", type=str, default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
+
+    # PROVIDERS subcommand
+    providers_p = subparsers.add_parser("providers", help="List, enable, or disable lyrics providers")
+    providers_sub = providers_p.add_subparsers(dest="provider_action", help="Provider action (list, enable, disable)")
+    providers_sub.add_parser("list", help="List all available providers and their status (default)")
+
+    enable_p = providers_sub.add_parser("enable", help="Enable one or more lyrics providers")
+    enable_p.add_argument("names", nargs="+", help="Names of providers to enable (e.g. spicylyrics lrclib)")
+    enable_p.add_argument("--no-save", action="store_true", help="Do not persist changes to config file")
+
+    disable_p = providers_sub.add_parser("disable", help="Disable one or more lyrics providers")
+    disable_p.add_argument("names", nargs="+", help="Names of providers to disable (e.g. genius lyricsify)")
+    disable_p.add_argument("--no-save", action="store_true", help="Do not persist changes to config file")
 
     return parser
 
@@ -508,6 +653,18 @@ def main() -> None:
     config_path = Path(args.config) if args.config else None
     config = load_config(config_path)
 
+    # Apply CLI provider overrides to config
+    if getattr(args, "providers", None):
+        config.enabled_providers = [p.strip().lower() for p in args.providers.split(",") if p.strip()]
+    if getattr(args, "disable_providers", None):
+        disabled = {p.strip().lower() for p in args.disable_providers.split(",") if p.strip()}
+        config.enabled_providers = [p for p in config.enabled_providers if p.lower() not in disabled]
+    if getattr(args, "enable_providers", None):
+        to_enable = [p.strip().lower() for p in args.enable_providers.split(",") if p.strip()]
+        for p in to_enable:
+            if p not in config.enabled_providers:
+                config.enabled_providers.append(p)
+
     if args.log_level:
         config.log_level = args.log_level
 
@@ -515,6 +672,10 @@ def main() -> None:
 
     # Default to scan mode if no subcommand is given
     command = args.command or "scan"
+
+    if command == "providers":
+        run_providers_command(args, config, config_path)
+        return
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

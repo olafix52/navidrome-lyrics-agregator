@@ -189,6 +189,7 @@ class LyricsMatcher:
                     "match_score": round(score, 2),
                     "content": lyrics.content,
                     "preview": "\n".join(lyrics.content.splitlines()[:6]),
+                    "metadata": lyrics.metadata,
                 }
             except asyncio.TimeoutError:
                 logger.debug(f"[{provider.name}] Manual search timed out after {timeout_per_provider}s")

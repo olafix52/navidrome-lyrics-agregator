@@ -62,6 +62,17 @@ const dom = {
   modalExecuteSearchBtn: document.getElementById("modalExecuteSearchBtn"),
   modalLoadingSpinner: document.getElementById("modalLoadingSpinner"),
   candidatesList: document.getElementById("candidatesList"),
+
+  // Providers modal
+  manageProvidersBtn: document.getElementById("manageProvidersBtn"),
+  providersModal: document.getElementById("providersModal"),
+  closeProvidersModalBtn: document.getElementById("closeProvidersModalBtn"),
+  providersSummaryText: document.getElementById("providersSummaryText"),
+  enableAllProvidersBtn: document.getElementById("enableAllProvidersBtn"),
+  resetDefaultProvidersBtn: document.getElementById("resetDefaultProvidersBtn"),
+  providersListContainer: document.getElementById("providersListContainer"),
+  saveProvidersBtn: document.getElementById("saveProvidersBtn"),
+  providersSaveFeedback: document.getElementById("providersSaveFeedback"),
 };
 
 // INITIALIZATION
@@ -77,6 +88,28 @@ function initEventListeners() {
     fetchStats();
     fetchTracks();
   });
+
+  // Providers modal
+  if (dom.manageProvidersBtn) {
+    dom.manageProvidersBtn.addEventListener("click", openProvidersModal);
+  }
+  if (dom.closeProvidersModalBtn) {
+    dom.closeProvidersModalBtn.addEventListener("click", closeProvidersModal);
+  }
+  if (dom.providersModal) {
+    dom.providersModal.addEventListener("click", (e) => {
+      if (e.target === dom.providersModal) closeProvidersModal();
+    });
+  }
+  if (dom.enableAllProvidersBtn) {
+    dom.enableAllProvidersBtn.addEventListener("click", () => setAllProviders(true));
+  }
+  if (dom.resetDefaultProvidersBtn) {
+    dom.resetDefaultProvidersBtn.addEventListener("click", resetDefaultProviders);
+  }
+  if (dom.saveProvidersBtn) {
+    dom.saveProvidersBtn.addEventListener("click", saveProviders);
+  }
 
   // Filter tabs
   dom.filterTabs.forEach((tab) => {
@@ -391,7 +424,7 @@ async function selectTrack(track) {
       return;
     }
 
-    ttmlRenderer.loadTTML(data.ttml_content || data.content);
+    ttmlRenderer.loadTTML(data.ttml_content || data.content, data.attribution);
   } catch (err) {
     console.error("Error loading lyrics:", err);
     dom.lyricsContainer.innerHTML = `
@@ -611,3 +644,183 @@ async function applyCandidateLyrics(candidate) {
     btn.textContent = "✓ Zastosuj tę wersję";
   }
 }
+
+// ==============================================================================
+// PROVIDERS MANAGEMENT MODAL
+// ==============================================================================
+let providersList = [];
+
+function openProvidersModal() {
+  if (!dom.providersModal) return;
+  dom.providersModal.style.display = "flex";
+  if (dom.providersSaveFeedback) dom.providersSaveFeedback.textContent = "";
+  fetchProviders();
+}
+
+function closeProvidersModal() {
+  if (!dom.providersModal) return;
+  dom.providersModal.style.display = "none";
+}
+
+async function fetchProviders() {
+  if (!dom.providersListContainer) return;
+  dom.providersListContainer.innerHTML = `<div class="text-dim text-center py-4">Wczytywanie listy dostawców...</div>`;
+
+  try {
+    const res = await fetch("/api/providers");
+    const data = await res.json();
+    providersList = data.providers || [];
+    renderProvidersList();
+  } catch (err) {
+    console.error("Fetch providers error:", err);
+    dom.providersListContainer.innerHTML = `<div class="text-red text-center py-4">Błąd podczas ładowania dostawców.</div>`;
+  }
+}
+
+function renderProvidersList() {
+  if (!dom.providersListContainer) return;
+  dom.providersListContainer.innerHTML = "";
+
+  const enabledCount = providersList.filter((p) => p.enabled).length;
+  if (dom.providersSummaryText) {
+    dom.providersSummaryText.textContent = `Aktywnych: ${enabledCount} / ${providersList.length}`;
+  }
+
+  providersList.forEach((prov, index) => {
+    const item = document.createElement("div");
+    item.className = `provider-item ${prov.enabled ? "is-enabled" : "is-disabled"}`;
+    item.dataset.id = prov.id;
+
+    const formatsBadges = (prov.formats || [])
+      .map((f) => {
+        const isWord = f.includes("Word");
+        const cls = isWord ? "badge-ttml" : "badge-lrc";
+        return `<span class="badge ${cls}">${f}</span>`;
+      })
+      .join(" ");
+
+    const apiKeyBadge = prov.requires_api_key
+      ? `<span class="badge badge-dim" title="Wymaga klucza w configu">🔑 Klucz API</span>`
+      : "";
+
+    item.innerHTML = `
+      <div class="provider-order-controls">
+        <button class="order-btn btn-up" title="Zwiększ priorytet (wyżej w kaskadzie)" ${index === 0 ? "disabled" : ""}>▲</button>
+        <span class="provider-rank">#${index + 1}</span>
+        <button class="order-btn btn-down" title="Zmniejsz priorytet (niżej w kaskadzie)" ${index === providersList.length - 1 ? "disabled" : ""}>▼</button>
+      </div>
+      <div class="provider-info">
+        <div class="provider-title-row">
+          <strong class="provider-name">${prov.name}</strong>
+          <code class="provider-id">${prov.id}</code>
+          ${formatsBadges}
+          ${apiKeyBadge}
+        </div>
+        <div class="provider-desc text-dim text-sm">${prov.description || ""}</div>
+      </div>
+      <div class="provider-toggle">
+        <label class="switch">
+          <input type="checkbox" ${prov.enabled ? "checked" : ""} class="provider-toggle-input">
+          <span class="slider round"></span>
+        </label>
+      </div>
+    `;
+
+    const upBtn = item.querySelector(".btn-up");
+    const downBtn = item.querySelector(".btn-down");
+    const toggleInput = item.querySelector(".provider-toggle-input");
+
+    upBtn.addEventListener("click", () => moveProvider(index, -1));
+    downBtn.addEventListener("click", () => moveProvider(index, 1));
+    toggleInput.addEventListener("change", (e) => {
+      prov.enabled = e.target.checked;
+      renderProvidersList();
+    });
+
+    dom.providersListContainer.appendChild(item);
+  });
+}
+
+function moveProvider(fromIndex, delta) {
+  const toIndex = fromIndex + delta;
+  if (toIndex < 0 || toIndex >= providersList.length) return;
+  const item = providersList.splice(fromIndex, 1)[0];
+  providersList.splice(toIndex, 0, item);
+  renderProvidersList();
+}
+
+function setAllProviders(enabledState) {
+  providersList.forEach((p) => {
+    p.enabled = enabledState;
+  });
+  renderProvidersList();
+}
+
+function resetDefaultProviders() {
+  const defaultOrder = [
+    "spicylyrics",
+    "amll",
+    "apple_music",
+    "rmmrevival",
+    "unison",
+    "binilyrics",
+    "lrclib",
+    "musixmatch",
+    "qqmusic",
+    "kuwo",
+    "netease",
+    "kugou",
+    "lyricsify",
+    "genius",
+  ];
+
+  providersList.sort((a, b) => {
+    const idxA = defaultOrder.indexOf(a.id);
+    const idxB = defaultOrder.indexOf(b.id);
+    return (idxA >= 0 ? idxA : 999) - (idxB >= 0 ? idxB : 999);
+  });
+
+  providersList.forEach((p) => {
+    p.enabled = true;
+  });
+  renderProvidersList();
+}
+
+async function saveProviders() {
+  if (!dom.saveProvidersBtn) return;
+  dom.saveProvidersBtn.disabled = true;
+  dom.saveProvidersBtn.textContent = "Zapisywanie...";
+
+  const enabledIds = providersList.filter((p) => p.enabled).map((p) => p.id);
+
+  try {
+    const res = await fetch("/api/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled_providers: enabledIds,
+        persist: true,
+      }),
+    });
+    const result = await res.json();
+    if (result.success) {
+      if (dom.providersSaveFeedback) {
+        dom.providersSaveFeedback.textContent = "✓ Zapisano pomyślnie!";
+        dom.providersSaveFeedback.style.color = "#34d399";
+        setTimeout(() => {
+          if (dom.providersSaveFeedback) dom.providersSaveFeedback.textContent = "";
+        }, 3000);
+      }
+      setTimeout(closeProvidersModal, 600);
+    } else {
+      alert("Błąd zapisu dostawców.");
+    }
+  } catch (err) {
+    console.error("Save providers error:", err);
+    alert("Wystąpił błąd podczas zapisywania konfiguracji dostawców.");
+  } finally {
+    dom.saveProvidersBtn.disabled = false;
+    dom.saveProvidersBtn.textContent = "💾 Zapisz i zastosuj";
+  }
+}
+

@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Navidrome Lyrics Aggregator - Dashboard & Karaoke</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="/static/lyrics.css">
+  <link rel="stylesheet" href="/static/style.css?v=2">
+  <link rel="stylesheet" href="/static/lyrics.css?v=2">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
@@ -21,6 +21,7 @@
       </div>
       <div class="header-actions">
         <span id="musicDirBadge" class="badge badge-dim">Folder: wczytywanie...</span>
+        <button id="manageProvidersBtn" class="btn btn-secondary">⚙️ Dostawcy</button>
         <button id="refreshStatsBtn" class="btn btn-secondary">🔄 Odśwież audyt</button>
       </div>
     </header>
@@ -210,6 +211,38 @@
     </div>
   </div>
 
-  <script type="module" src="/static/app.js"></script>
+  <!-- MODAL: PROVIDERS CONFIGURATION -->
+  <div id="providersModal" class="modal-backdrop" style="display:none;">
+    <div class="modal-card providers-modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>Zarządzanie dostawcami tekstów</h3>
+          <p class="text-dim">Włączaj, wyłączaj i ustalaj kolejność priorytetu (kaskady) źródeł</p>
+        </div>
+        <button id="closeProvidersModalBtn" class="modal-close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="providers-toolbar">
+          <span class="text-dim text-sm" id="providersSummaryText">Wczytywanie...</span>
+          <div class="providers-toolbar-actions">
+            <button id="enableAllProvidersBtn" class="btn btn-sm btn-secondary">Włącz wszystkie</button>
+            <button id="resetDefaultProvidersBtn" class="btn btn-sm btn-secondary">Domyślna kolejność</button>
+          </div>
+        </div>
+
+        <div id="providersListContainer" class="providers-list">
+          <div class="text-dim text-center py-4">Wczytywanie listy dostawców...</div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span id="providersSaveFeedback" class="save-feedback"></span>
+        <button id="saveProvidersBtn" class="btn btn-primary">💾 Zapisz i zastosuj</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/app.js?v=2"></script>
 </body>
 </html>

@@ -298,3 +298,46 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
 
     _apply_env_overrides(data)
     return AppConfig(**data)
+
+
+def save_enabled_providers(
+    enabled_list: List[str], config_path: Optional[Path] = None
+) -> Path:
+    """Save or update the enabled_providers list in the configuration file."""
+    # Priority for target file:
+    # 1. Explicit config_path if provided
+    # 2. config.local.yaml if it exists
+    # 3. config.yaml if it exists
+    # 4. Fallback to ./config.yaml
+    if config_path and Path(config_path).is_file():
+        target = Path(config_path)
+    elif Path("./config.local.yaml").is_file():
+        target = Path("./config.local.yaml")
+    elif Path("./config.yaml").is_file():
+        target = Path("./config.yaml")
+    elif Path("/config/config.yaml").is_file():
+        target = Path("/config/config.yaml")
+    else:
+        target = Path("./config.yaml")
+
+    new_block_lines = ["enabled_providers:\n"]
+    for p in enabled_list:
+        new_block_lines.append(f'  - "{p}"\n')
+    new_block = "".join(new_block_lines)
+
+    if target.exists():
+        content = target.read_text(encoding="utf-8")
+        pattern = re.compile(r"^enabled_providers:\s*(?:\n\s*-\s*[^\n]*)+", re.MULTILINE)
+        if pattern.search(content):
+            updated_content = pattern.sub(new_block.rstrip("\n"), content)
+        elif "enabled_providers:" in content:
+            pattern_inline = re.compile(r"^enabled_providers:.*$", re.MULTILINE)
+            updated_content = pattern_inline.sub(new_block.rstrip("\n"), content)
+        else:
+            updated_content = content + "\n\n" + new_block
+        target.write_text(updated_content, encoding="utf-8")
+    else:
+        target.write_text(new_block, encoding="utf-8")
+
+    return target
+
