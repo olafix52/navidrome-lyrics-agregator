@@ -254,7 +254,7 @@ All parameters can also be configured using environment variables with the `NLA_
 Spicy Lyrics is the highest-priority provider for syllable-level synchronized TTML lyrics (with Apple Music & Spotify database coverage, background vocals, and duet support).
 
 **Getting an API key is free and takes less than a minute:**
-1. Visit the [Spicy Lyrics Developer Dashboard](https://developers.spicylyrics.org/dashboard) and sign up / log in with your Discord or GitHub account.
+1. Visit the [Spicy Lyrics Developer Dashboard](https://developers.spicylyrics.org/dashboard) and sign up / log in.
 2. Under the **API Keys** section, click **Create Key** (or generate a Secret Key).
 3. Copy your Secret Key (starts with `sl_sk_...`).
 4. Add it to your project in one of two ways:
