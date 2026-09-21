@@ -198,6 +198,8 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
         artist=args.artist,
         album=args.album,
         duration=float(args.duration or 0),
+        spotify_id=getattr(args, "spotify_id", None),
+        isrc=getattr(args, "isrc", None),
         clean_title=clean_title(args.title),
         clean_artist=clean_artist(args.artist),
     )
@@ -393,7 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("path", nargs="?", type=str, help="Target folder or file to scan (positional)")
     scan_p.add_argument("-t", "--target", type=str, help="Specific target folder or audio file to scan")
     scan_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
-    scan_p.add_argument("-f", "--force", action="store_true", help="Force re-fetching and overwrite existing lyrics")
+    scan_p.add_argument("-f", "--force", "--overwrite", dest="force", action="store_true", help="Force re-fetching and overwrite existing lyrics")
     scan_p.add_argument("--dry-run", action="store_true", help="Simulate scan without writing files")
     scan_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     scan_p.add_argument("--concurrency", type=int, help="Number of concurrent download tasks")
@@ -431,6 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
     test_p.add_argument("-a", "--artist", type=str, required=True, help="Track artist")
     test_p.add_argument("--album", type=str, help="Track album name")
     test_p.add_argument("--duration", type=float, default=0.0, help="Track duration in seconds")
+    test_p.add_argument("--spotify-id", type=str, help="Spotify Track ID or URL")
+    test_p.add_argument("--isrc", type=str, help="ISRC code (e.g. GBUM71029604)")
 
     # AUDIT / STATS subcommand
     for cmd_name in ["audit", "stats"]:

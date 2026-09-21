@@ -837,21 +837,44 @@ body {
   color: #ffffff;
 }
 
-.lyric-span.past {
-  color: #ffffff;
-}
-
 .word-group {
   display: inline-block;
   white-space: nowrap;
   vertical-align: baseline;
 }
 
+/* Background vocals / ad-libs */
 .lyric-line.adlib {
-  font-size: 0.85em;
-  opacity: 0.5;
-  margin-top: -0.2rem;
-  font-style: italic;
+  font-size: clamp(0.95rem, 1.6vw, 1.25rem);
+  font-weight: 600;
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 0.1rem;
+  margin-bottom: 0.65rem;
+  padding: 0.2rem 0;
+  opacity: 1;
+}
+
+.lyric-line.apple-music.adlib {
+  font-size: clamp(1.05rem, 1.9vw, 1.45rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 0.1rem;
+  margin-bottom: 0.7rem;
+  opacity: 1;
+}
+
+.lyric-line.adlib.active-line,
+.lyric-line.apple-music.adlib.active-line {
+  color: #ffffff;
+  transform: scale(1.015);
+  transform-origin: left center;
+}
+
+.lyric-line:has(+ .lyric-line.adlib) {
+  margin-bottom: 0.15rem;
 }
 
 /* Hairline instrumental break bars */

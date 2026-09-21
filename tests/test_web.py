@@ -340,6 +340,45 @@ def test_karaoke_to_ttml_conversion():
     assert spans_p2[0].text == "Line "
 
 
+def test_karaoke_ttml_duet_agents():
+    """Verify parse_ttml_to_karaoke and karaoke_to_ttml preserve ttm:agent across conversions."""
+    from src.web.parser import parse_ttml_to_karaoke, karaoke_to_ttml, KaraokeLine
+
+    sample_ttml = """<?xml version="1.0" encoding="utf-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+  <head>
+    <metadata>
+      <ttm:agent type="person" xml:id="v1">Billie Eilish</ttm:agent>
+      <ttm:agent type="person" xml:id="v2">Khalid</ttm:agent>
+    </metadata>
+  </head>
+  <body>
+    <div>
+      <p begin="00:10.000" end="00:12.000" ttm:agent="v1">
+        <span begin="00:10.000" end="00:12.000">Billie line</span>
+      </p>
+      <p begin="00:13.000" end="00:15.000" ttm:agent="v2">
+        <span begin="00:13.000" end="00:15.000">Khalid line</span>
+      </p>
+    </div>
+  </body>
+</tt>"""
+
+    lines = parse_ttml_to_karaoke(sample_ttml)
+    assert len(lines) == 2
+    assert lines[0].agent == "v1"
+    assert lines[0].text == "Billie line"
+    assert lines[1].agent == "v2"
+    assert lines[1].text == "Khalid line"
+
+    exported_ttml = karaoke_to_ttml(lines, title="lovely", artist="Billie Eilish & Khalid")
+    assert '<ttm:agent type="person" xml:id="v1">Billie Eilish</ttm:agent>' in exported_ttml
+    assert '<ttm:agent type="person" xml:id="v2">Khalid</ttm:agent>' in exported_ttml
+    assert 'ttm:agent="v1"' in exported_ttml
+    assert 'ttm:agent="v2"' in exported_ttml
+
+
 @pytest.mark.asyncio
 async def test_api_lyrics_ttml_content(tmp_path: Path):
     """Verify GET /api/tracks/{id}/lyrics returns valid ttml_content for both TTML and LRC tracks."""

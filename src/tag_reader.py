@@ -1,6 +1,7 @@
 """Audio metadata and tag extraction using mutagen for FLAC, MP3, M4A, Opus, Ogg, and more."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, List, Optional
 import mutagen
@@ -50,7 +51,12 @@ def _get_first_tag_value(tags: Any, keys: List[str]) -> Optional[str]:
         if key in tags:
             val = tags[key]
             if isinstance(val, (list, tuple)) and val:
-                return str(val[0]).strip()
+                item = val[0]
+                if isinstance(item, bytes):
+                    return item.decode("utf-8", errors="replace").strip()
+                return str(item).strip()
+            elif isinstance(val, bytes):
+                return val.decode("utf-8", errors="replace").strip()
             elif isinstance(val, str) and val.strip():
                 return val.strip()
             elif val is not None:
@@ -78,6 +84,19 @@ def _fallback_parse_filename(file_path: Path) -> tuple[str, str]:
     return artist, title
 
 
+def _extract_spotify_id(val: Optional[str]) -> Optional[str]:
+    """Extract a 22-char Spotify track ID from a string, URL, or URI."""
+    if not val:
+        return None
+    val = val.strip()
+    if re.fullmatch(r"[A-Za-z0-9]{22}", val):
+        return val
+    m = re.search(r"(?:spotify:track:|spotify\.com/track/)([A-Za-z0-9]{22})", val)
+    if m:
+        return m.group(1)
+    return None
+
+
 def read_track_metadata(file_path: Path) -> Optional[TrackMetadata]:
     """Read metadata tags and duration from an audio file."""
     if not file_path.is_file() or not is_supported_audio_file(file_path):
@@ -98,20 +117,59 @@ def read_track_metadata(file_path: Path) -> Optional[TrackMetadata]:
         album_artist: Optional[str] = None
         isrc: Optional[str] = None
         mb_trackid: Optional[str] = None
+        spotify_id: Optional[str] = None
 
         if isinstance(audio, MP4) and tags:
             title = _get_first_tag_value(tags, ["\xa9nam", "title"])
             artist = _get_first_tag_value(tags, ["\xa9ART", "artist"])
             album = _get_first_tag_value(tags, ["\xa9alb", "album"])
             album_artist = _get_first_tag_value(tags, ["aART", "albumartist"])
+            isrc = _get_first_tag_value(tags, [
+                "----:com.apple.iTunes:ISRC",
+                "----:com.apple.iTunes:isrc",
+            ])
+            raw_sp = _get_first_tag_value(tags, [
+                "----:com.apple.iTunes:SPOTIFY_TRACK_ID",
+                "----:com.apple.iTunes:SPOTIFY_ID",
+                "----:com.apple.iTunes:spotify_id",
+            ])
+            spotify_id = _extract_spotify_id(raw_sp)
         elif tags:
             # Vorbis / ID3 / FLAC / General keys
             title = _get_first_tag_value(tags, ["TIT2", "title", "TITLE", "Title"])
             artist = _get_first_tag_value(tags, ["TPE1", "artist", "ARTIST", "Artist"])
             album = _get_first_tag_value(tags, ["TALB", "album", "ALBUM", "Album"])
             album_artist = _get_first_tag_value(tags, ["TPE2", "albumartist", "ALBUMARTIST", "album_artist"])
-            isrc = _get_first_tag_value(tags, ["TSRC", "isrc", "ISRC"])
+            isrc = _get_first_tag_value(tags, [
+                "TSRC",
+                "TXXX:ISRC",
+                "TXXX:isrc",
+                "isrc",
+                "ISRC",
+            ])
             mb_trackid = _get_first_tag_value(tags, ["UFID:http://musicbrainz.org", "musicbrainz_trackid"])
+            raw_sp = _get_first_tag_value(tags, [
+                "TXXX:SPOTIFY_TRACK_ID",
+                "TXXX:SPOTIFY_ID",
+                "TXXX:Spotify Track ID",
+                "SPOTIFY_TRACK_ID",
+                "SPOTIFY_ID",
+                "SPOTIFYID",
+                "WOAS",
+                "WXXX:SPOTIFY",
+            ])
+            spotify_id = _extract_spotify_id(raw_sp)
+            if not spotify_id:
+                comm = _get_first_tag_value(tags, ["COMM", "description", "COMMENT", "comment"])
+                spotify_id = _extract_spotify_id(comm)
+
+        # Normalize ISRC if present (remove hyphens, ensure 12 alphanumeric characters)
+        if isrc:
+            cleaned_isrc = re.sub(r"[^A-Za-z0-9]", "", isrc).upper()
+            if len(cleaned_isrc) == 12:
+                isrc = cleaned_isrc
+            else:
+                isrc = None
 
         # If title or artist is missing, fallback to filename
         if not title or not artist:
@@ -132,6 +190,7 @@ def read_track_metadata(file_path: Path) -> Optional[TrackMetadata]:
             album_artist=album_artist,
             isrc=isrc,
             musicbrainz_trackid=mb_trackid,
+            spotify_id=spotify_id,
             clean_title=clean_t,
             clean_artist=clean_a,
             has_embedded_lyrics=embedded_lyrics,

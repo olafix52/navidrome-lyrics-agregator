@@ -15,6 +15,7 @@ from src.providers.musixmatch import MusixmatchProvider
 from src.providers.netease import NetEaseProvider
 from src.providers.qqmusic import QQMusicProvider
 from src.providers.rmmrevival import RMMRevivalProvider
+from src.providers.spicylyrics import SpicyLyricsProvider
 from src.providers.unison import UnisonProvider
 
 AVAILABLE_PROVIDERS: Dict[str, Type[BaseLyricsProvider]] = {
@@ -22,6 +23,7 @@ AVAILABLE_PROVIDERS: Dict[str, Type[BaseLyricsProvider]] = {
     "apple_music": AppleMusicProvider,
     "rmmrevival": RMMRevivalProvider,
     "unison": UnisonProvider,
+    "spicylyrics": SpicyLyricsProvider,
     "binilyrics": BiniLyricsProvider,
     "lrclib": LrclibProvider,
     "musixmatch": MusixmatchProvider,
@@ -65,6 +67,7 @@ __all__ = [
     "AppleMusicProvider",
     "RMMRevivalProvider",
     "UnisonProvider",
+    "SpicyLyricsProvider",
     "BiniLyricsProvider",
     "LrclibProvider",
     "MusixmatchProvider",

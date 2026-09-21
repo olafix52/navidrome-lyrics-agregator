@@ -23,6 +23,7 @@ class KaraokeLine(BaseModel):
     start: Optional[float] = None
     end: Optional[float] = None
     words: Optional[List[KaraokeWord]] = None
+    agent: Optional[str] = "v1"
 
 
 def parse_time_str_to_seconds(time_str: str) -> Optional[float]:
@@ -92,6 +93,7 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
         for p in p_elements:
             start_s = parse_time_str_to_seconds(_get_element_attr(p, "begin"))
             end_s = parse_time_str_to_seconds(_get_element_attr(p, "end"))
+            agent = _get_element_attr(p, "agent") or "v1"
 
             raw_line_text = "".join(html.unescape(t) for t in p.itertext())
             line_text = re.sub(r'\s+', ' ', raw_line_text).strip()
@@ -99,7 +101,9 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
             words: List[KaraokeWord] = []
             timed_spans = [
                 s for s in p.iter()
-                if s.tag.split("}")[-1].lower() == "span" and _get_element_attr(s, "begin")
+                if s.tag.split("}")[-1].lower() == "span"
+                and _get_element_attr(s, "begin")
+                and not any(child.tag.split("}")[-1].lower() == "span" for child in s)
             ]
 
             if timed_spans:
@@ -127,6 +131,7 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
                     start=start_s,
                     end=end_s,
                     words=words if words else None,
+                    agent=agent,
                 ))
     else:
         # Fallback regex parsing if XML is completely malformed
@@ -134,8 +139,10 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
         for attrs, body in p_matches:
             begin_m = re.search(r'begin="([^"]+)"', attrs)
             end_m = re.search(r'end="([^"]+)"', attrs)
+            agent_m = re.search(r'(?:ttm:)?agent="([^"]+)"', attrs)
             start_s = parse_time_str_to_seconds(begin_m.group(1)) if begin_m else None
             end_s = parse_time_str_to_seconds(end_m.group(1)) if end_m else None
+            agent = agent_m.group(1) if agent_m else "v1"
 
             raw_text = re.sub(r'<[^>]+>', ' ', body)
             line_text = re.sub(r'\s+', ' ', html.unescape(raw_text)).strip()
@@ -161,6 +168,7 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
                     start=start_s,
                     end=end_s,
                     words=words if words else None,
+                    agent=agent,
                 ))
 
     # Auto-fill missing line ends based on next line starts
@@ -354,6 +362,20 @@ def karaoke_to_ttml(lines: List[KaraokeLine], title: str = "", artist: str = "")
     title_escaped = html.escape(title or "Unknown Track")
     artist_escaped = html.escape(artist or "")
 
+    has_v2 = any("v2" in (line.agent or "") for line in lines)
+    if has_v2:
+        artist_parts = [
+            a.strip()
+            for a in re.split(r"\s+(?:feat\.?|ft\.?|&|,|/|with)\s+", artist, flags=re.IGNORECASE)
+            if a.strip()
+        ]
+        a1 = html.escape(artist_parts[0]) if artist_parts else artist_escaped
+        a2 = html.escape(artist_parts[1]) if len(artist_parts) > 1 else ""
+        agent_metadata = f"""      <ttm:agent type="person" xml:id="v1">{a1}</ttm:agent>
+      <ttm:agent type="person" xml:id="v2">{a2}</ttm:agent>"""
+    else:
+        agent_metadata = f"""      <ttm:agent type="person" xml:id="v1">{artist_escaped}</ttm:agent>"""
+
     p_blocks: List[str] = []
     for line in lines:
         if not line.text.strip():
@@ -364,6 +386,7 @@ def karaoke_to_ttml(lines: List[KaraokeLine], title: str = "", artist: str = "")
 
         p_begin = format_seconds_to_ttml_time(start_s)
         p_end = format_seconds_to_ttml_time(end_s)
+        agent_attr = f' ttm:agent="{line.agent or "v1"}"'
 
         if line.words and len(line.words) > 0:
             spans = []
@@ -377,7 +400,7 @@ def karaoke_to_ttml(lines: List[KaraokeLine], title: str = "", artist: str = "")
             line_escaped = html.escape(line.text)
             p_content = f'<span begin="{p_begin}" end="{p_end}">{line_escaped}</span>'
 
-        p_blocks.append(f'      <p begin="{p_begin}" end="{p_end}">\n        {p_content}\n      </p>')
+        p_blocks.append(f'      <p begin="{p_begin}" end="{p_end}"{agent_attr}>\n        {p_content}\n      </p>')
 
     body_content = "\n".join(p_blocks)
 
@@ -392,6 +415,7 @@ def karaoke_to_ttml(lines: List[KaraokeLine], title: str = "", artist: str = "")
   <head>
     <metadata>
       <ttm:title>{title_escaped}</ttm:title>
+{agent_metadata}
       <itunes:iTunesMetadata>
 {songwriter_xml}
       </itunes:iTunesMetadata>

@@ -48,6 +48,7 @@ log_level: "INFO"
 # As soon as valid synchronized lyrics are matched, the cascade stops.
 # ==============================================================================
 enabled_providers:
+  - "spicylyrics"    # Spicy Lyrics Developer API (TTML syllable word-sync / LRC line-sync)
   - "amll"           # Apple Music-Like Lyrics DB (TTML syllable-level sync)
   - "apple_music"    # Apple Music Catalog API / AMLL bridge (TTML)
   - "rmmrevival"     # RMM Revival / Apple Music Worker (word-sync TTML & LRC)
@@ -93,6 +94,15 @@ providers:
     rate_limit_per_second: 3.0
     timeout_seconds: 10.0
     # custom_url: "https://unison.boidu.dev" # Public open crowdsourced database (no API key required)
+
+  spicylyrics:
+    enabled: true
+    rate_limit_per_second: 3.0
+    timeout_seconds: 10.0
+    # api_key: "sl_sk_..." # SPICY_LYRICS_SECRET_KEY from https://developers.spicylyrics.org/dashboard
+    # extra:
+    #   spotify_client_id: ""       # Optional: Spotify API credentials for automatic track ID resolution
+    #   spotify_client_secret: ""
 
   binilyrics:
     enabled: true

@@ -7,6 +7,10 @@
   animation: float-up var(--word-dur, 0.25s) cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+.lyrics-outer:not(.apple-music) .lyric-span.active {
+  text-shadow: 0 0 16px var(--active-glow, rgba(56, 189, 248, 0.5));
+}
+
 .lyric-span.active.long-word {    
   animation: float-up var(--word-dur, 0.25s) cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }

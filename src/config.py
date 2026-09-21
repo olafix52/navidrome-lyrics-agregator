@@ -101,6 +101,7 @@ class AppConfig(BaseModel):
     # Providers order and cascade
     enabled_providers: List[str] = Field(
         default=[
+            "spicylyrics",
             "amll",
             "apple_music",
             "rmmrevival",
@@ -125,6 +126,7 @@ class AppConfig(BaseModel):
             "apple_music": ProviderConfig(rate_limit_per_second=2.0),
             "rmmrevival": ProviderConfig(rate_limit_per_second=2.0, timeout_seconds=15.0),
             "unison": ProviderConfig(rate_limit_per_second=3.0),
+            "spicylyrics": ProviderConfig(rate_limit_per_second=3.0),
             "binilyrics": ProviderConfig(rate_limit_per_second=3.0),
             "lrclib": ProviderConfig(rate_limit_per_second=4.0),
             "musixmatch": ProviderConfig(rate_limit_per_second=2.0),
@@ -216,6 +218,19 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
     if fs_url:
         data.setdefault("providers", {}).setdefault("lyricsify", {}).setdefault("extra", {})["flaresolverr_url"] = fs_url
 
+    # Spicy Lyrics API key & Spotify credentials
+    spicy_key = os.environ.get("SPICY_LYRICS_SECRET_KEY") or os.environ.get("NLA_SPICY_LYRICS_API_KEY")
+    if spicy_key:
+        data.setdefault("providers", {}).setdefault("spicylyrics", {})["api_key"] = spicy_key
+
+    sp_client_id = os.environ.get("SPOTIFY_CLIENT_ID") or os.environ.get("NLA_SPOTIFY_CLIENT_ID")
+    if sp_client_id:
+        data.setdefault("providers", {}).setdefault("spicylyrics", {}).setdefault("extra", {})["spotify_client_id"] = sp_client_id
+
+    sp_client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET") or os.environ.get("NLA_SPOTIFY_CLIENT_SECRET")
+    if sp_client_secret:
+        data.setdefault("providers", {}).setdefault("spicylyrics", {}).setdefault("extra", {})["spotify_client_secret"] = sp_client_secret
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Deep merge override dict into base dict. Override values take precedence."""
@@ -234,6 +249,12 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
     If config.local.yaml exists, it is deep-merged on top of config.yaml,
     so users only need to specify overrides in the local file.
     """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
+
     data: Dict[str, Any] = {}
 
     # If explicit path provided or via env var, use it directly

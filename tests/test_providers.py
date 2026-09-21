@@ -1,7 +1,7 @@
 """Unit tests for all 9 lyrics providers with mocked HTTP requests."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from src.config import ProviderConfig
 from src.models import LyricsFormat, LyricsSyncType, TrackMetadata
@@ -17,6 +17,7 @@ from src.providers.musixmatch import MusixmatchProvider
 from src.providers.netease import NetEaseProvider
 from src.providers.qqmusic import QQMusicProvider
 from src.providers.rmmrevival import RMMRevivalProvider
+from src.providers.spicylyrics import SpicyLyricsProvider
 from src.providers.unison import UnisonProvider
 
 
@@ -927,4 +928,417 @@ def test_ttml_builder_and_timestamps():
     assert 'itunes:timing="Word"' in xml
     assert '<span begin="00:01.000" end="00:02.000">Hello </span>' in xml
     assert '<span begin="00:04.000" end="00:06.000">Fallback plain line</span>' in xml
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_syllable(sample_track):
+    sample_track.spotify_id = "4cOdK2wGLETKBW3PvgPWqT"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Syllable",
+            "source": "apple_music",
+            "UploadAttribution": {"Maker": "Spicy Community"},
+            "SongWriters": ["Freddie Mercury"],
+            "EndTime": 354.0,
+            "Content": [
+                {
+                    "Lead": {
+                        "StartTime": 1.0,
+                        "EndTime": 3.0,
+                        "Syllables": [
+                            {"Text": "Fa", "StartTime": 1.0, "EndTime": 1.5, "IsPartOfWord": True},
+                            {"Text": "ther", "StartTime": 1.6, "EndTime": 2.0, "IsPartOfWord": False},
+                            {"Text": "stretch", "StartTime": 2.1, "EndTime": 2.5, "IsPartOfWord": False},
+                        ],
+                    },
+                    "Background": [
+                        {
+                            "Syllables": [
+                                {"Text": "re", "StartTime": 2.6, "EndTime": 2.8, "IsPartOfWord": True},
+                                {"Text": "al", "StartTime": 2.8, "EndTime": 3.0, "IsPartOfWord": False},
+                            ]
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.format == LyricsFormat.TTML
+        assert result.sync_type == LyricsSyncType.WORD_SYNC
+        assert result.provider_name == "spicylyrics"
+        assert result.duration == 354.0
+        assert result.metadata["source"] == "apple_music"
+        assert result.metadata["spotify_id"] == "4cOdK2wGLETKBW3PvgPWqT"
+        assert result.metadata["songwriters"] == ["Freddie Mercury"]
+        # Multi-syllable word 'Fa-ther': 'Fa' has no trailing space, 'ther ' has trailing space, zero whitespace between spans
+        assert '<span begin="00:01.000" end="00:01.500">Fa</span><span begin="00:01.600" end="00:02.000">ther </span>' in result.content
+        # Background vocal enclosed in <span ttm:role="x-bg"> with child spans wrapped in parentheses
+        assert '<span ttm:role="x-bg"' in result.content
+        assert '<span begin="00:02.600" end="00:02.800">(re</span><span begin="00:02.800" end="00:03.000">al)</span>' in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_duet(sample_track):
+    sample_track.artist = "Billie Eilish & Khalid"
+    sample_track.title = "lovely"
+    sample_track.spotify_id = "0u2P5u6lvoDfwTYjAADbn4"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Syllable",
+            "source": "apple_music",
+            "UploadAttribution": {"Maker": "Spicy Community"},
+            "SongWriters": ["Billie Eilish", "Khalid Robinson"],
+            "EndTime": 200.0,
+            "Content": [
+                {
+                    "OppositeAligned": False,
+                    "Lead": {
+                        "StartTime": 10.0,
+                        "EndTime": 12.0,
+                        "Syllables": [
+                            {"Text": "Thought ", "StartTime": 10.0, "EndTime": 11.0, "IsPartOfWord": False},
+                            {"Text": "I ", "StartTime": 11.0, "EndTime": 12.0, "IsPartOfWord": False},
+                        ],
+                    },
+                },
+                {
+                    "OppositeAligned": True,
+                    "Lead": {
+                        "StartTime": 13.0,
+                        "EndTime": 15.0,
+                        "Syllables": [
+                            {"Text": "found ", "StartTime": 13.0, "EndTime": 14.0, "IsPartOfWord": False},
+                            {"Text": "a ", "StartTime": 14.0, "EndTime": 15.0, "IsPartOfWord": False},
+                        ],
+                    },
+                },
+            ],
+        },
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.format == LyricsFormat.TTML
+        assert result.sync_type == LyricsSyncType.WORD_SYNC
+        # Check agents in metadata
+        assert '<ttm:agent type="person" xml:id="v1">Billie Eilish</ttm:agent>' in result.content
+        assert '<ttm:agent type="person" xml:id="v2">Khalid</ttm:agent>' in result.content
+        # Check agent attributes on paragraphs
+        assert 'ttm:agent="v1"' in result.content
+        assert 'ttm:agent="v2"' in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_line(sample_track):
+    sample_track.spotify_id = "4cOdK2wGLETKBW3PvgPWqT"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "source": "spotify",
+            "EndTime": 120.0,
+            "Content": [
+                {"Text": "Is this the real life?", "StartTime": 10.5, "EndTime": 13.0},
+                {"Text": "Is this just fantasy?", "StartTime": 13.5, "EndTime": 16.0},
+            ],
+        },
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.format == LyricsFormat.LRC
+        assert result.sync_type == LyricsSyncType.LINE_SYNC
+        assert result.provider_name == "spicylyrics"
+        assert "[00:10.50]Is this the real life?" in result.content
+        assert "[00:13.50]Is this just fantasy?" in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_static(sample_track):
+    sample_track.spotify_id = "4cOdK2wGLETKBW3PvgPWqT"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Static",
+            "source": "spicy_lyrics",
+            "Lines": [
+                {"Text": "Is this the real life?"},
+                {"Text": "Is this just fantasy?"},
+            ],
+        },
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.format == LyricsFormat.TXT
+        assert result.sync_type == LyricsSyncType.UNSYNCED
+        assert result.provider_name == "spicylyrics"
+        assert "Is this the real life?\nIs this just fantasy?" == result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_no_key(sample_track):
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key=None))
+    result = await provider.get_lyrics(sample_track)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_invalid_id(sample_track):
+    sample_track.spotify_id = "short_id"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+    result = await provider.get_lyrics(sample_track)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_spotify_search_resolution(sample_track):
+    sample_track.spotify_id = None
+    sample_track.isrc = "GBUM71029604"
+    provider = SpicyLyricsProvider(
+        config=ProviderConfig(
+            api_key="sl_sk_test_123",
+            extra={
+                "spotify_client_id": "test_client_id",
+                "spotify_client_secret": "test_client_secret",
+            },
+        )
+    )
+
+    mock_token_resp = MagicMock()
+    mock_token_resp.status_code = 200
+    mock_token_resp.json.return_value = {"access_token": "sp_mock_token", "expires_in": 3600}
+
+    mock_search_resp = MagicMock()
+    mock_search_resp.status_code = 200
+    mock_search_resp.json.return_value = {
+        "tracks": {
+            "items": [
+                {
+                    "id": "4cOdK2wGLETKBW3PvgPWqT",
+                    "duration_ms": 354000,
+                }
+            ]
+        }
+    }
+
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=mock_token_resp)
+    mock_client.get = AsyncMock(return_value=mock_search_resp)
+
+    mock_spicy_resp = MagicMock()
+    mock_spicy_resp.status_code = 200
+    mock_spicy_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "Content": [{"Text": "Mama, just killed a man", "StartTime": 5.0}],
+        },
+    }
+
+    with patch.object(provider, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch.object(provider, "request_with_retry", return_value=mock_spicy_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.metadata["spotify_id"] == "4cOdK2wGLETKBW3PvgPWqT"
+        assert "[00:05.00]Mama, just killed a man" in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_musicbrainz_isrc_resolution(sample_track):
+    sample_track.spotify_id = None
+    sample_track.isrc = "GBUM71029604"
+    # No spotify client id/secret provided
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_mb_resp = MagicMock()
+    mock_mb_resp.status_code = 200
+    mock_mb_resp.json.return_value = {
+        "recordings": [
+            {
+                "id": "rec-123",
+                "relations": [
+                    {
+                        "url": {
+                            "resource": "https://open.spotify.com/track/2OBofMJx94NryV2SK8p8Zf"
+                        }
+                    }
+                ],
+            }
+        ]
+    }
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=mock_mb_resp)
+
+    mock_spicy_resp = MagicMock()
+    mock_spicy_resp.status_code = 200
+    mock_spicy_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "Content": [{"Text": "Mama, just killed a man", "StartTime": 5.0}],
+        },
+    }
+
+    with patch.object(provider, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch.object(provider, "request_with_retry", return_value=mock_spicy_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.metadata["spotify_id"] == "2OBofMJx94NryV2SK8p8Zf"
+        assert "[00:05.00]Mama, just killed a man" in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_anonymous_isrc_resolution(sample_track):
+    sample_track.spotify_id = None
+    sample_track.isrc = "PL4K02622961"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_embed_resp = MagicMock()
+    mock_embed_resp.status_code = 200
+    mock_embed_resp.text = """
+    <html><script id="__NEXT_DATA__" type="application/json">
+    {"props": {"pageProps": {"state": {"settings": {"session": {
+        "accessToken": "mock_anon_token_123",
+        "accessTokenExpirationTimestampMs": 1999999999000
+    }}}}}}
+    </script></html>
+    """
+
+    mock_pathfinder_resp = MagicMock()
+    mock_pathfinder_resp.status_code = 200
+    mock_pathfinder_resp.json.return_value = {
+        "data": {
+            "searchV2": {
+                "tracksV2": {
+                    "items": [
+                        {
+                            "item": {
+                                "data": {
+                                    "name": "PRESIDENT",
+                                    "uri": "spotify:track:22AyfOBziPxrg9sHz0L6Yw",
+                                    "duration": {"totalMilliseconds": 186666},
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=[mock_embed_resp, mock_pathfinder_resp])
+
+    mock_spicy_resp = MagicMock()
+    mock_spicy_resp.status_code = 200
+    mock_spicy_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "Content": [{"Text": "Mój trzeci Rolex", "StartTime": 12.0}],
+        },
+    }
+
+    with patch.object(provider, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch.object(provider, "request_with_retry", return_value=mock_spicy_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.metadata["spotify_id"] == "22AyfOBziPxrg9sHz0L6Yw"
+        assert "[00:12.00]Mój trzeci Rolex" in result.content
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_provider_anonymous_title_artist_resolution(sample_track):
+    sample_track.spotify_id = None
+    sample_track.isrc = None
+    sample_track.duration = 186.0
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_embed_resp = MagicMock()
+    mock_embed_resp.status_code = 200
+    mock_embed_resp.text = """
+    <html><script id="__NEXT_DATA__" type="application/json">
+    {"props": {"pageProps": {"state": {"settings": {"session": {
+        "accessToken": "mock_anon_token_123",
+        "accessTokenExpirationTimestampMs": 1999999999000
+    }}}}}}
+    </script></html>
+    """
+
+    mock_pathfinder_resp = MagicMock()
+    mock_pathfinder_resp.status_code = 200
+    mock_pathfinder_resp.json.return_value = {
+        "data": {
+            "searchV2": {
+                "tracksV2": {
+                    "items": [
+                        {
+                            "item": {
+                                "data": {
+                                    "name": "PRESIDENT",
+                                    "uri": "spotify:track:22AyfOBziPxrg9sHz0L6Yw",
+                                    "duration": {"totalMilliseconds": 186000},
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(side_effect=[mock_embed_resp, mock_pathfinder_resp])
+
+    mock_spicy_resp = MagicMock()
+    mock_spicy_resp.status_code = 200
+    mock_spicy_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "Content": [{"Text": "Mój trzeci Rolex", "StartTime": 12.0}],
+        },
+    }
+
+    with patch.object(provider, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch.object(provider, "request_with_retry", return_value=mock_spicy_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert result.metadata["spotify_id"] == "22AyfOBziPxrg9sHz0L6Yw"
+
 

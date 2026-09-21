@@ -13,20 +13,21 @@
 
 ## 🌟 Kluczowe funkcje
 
-- **Kaskada priorytetów (Quality Cascade) – 13 dostawców:**
-  1. `amll` – Apple Music-Like Lyrics DB (`.ttml` z sylabami i wieloma wokalistami).
-  2. `apple_music` – Apple Music Catalog / AMLL (`.ttml`).
-  3. `rmmrevival` – RMM Revival / Apple Music Worker (word-sync `.ttml` oraz `.lrc`).
-  4. `unison` – Społecznościowe API Better Lyrics Unison (`.ttml` / `.yaml` / `.lrc`).
-  5. `binilyrics` – BiniLyrics / Aligned REST API (`.ttml` / `.lrc`).
-  6. `lrclib` – LRCLIB Database (`.yaml` word-synced oraz `.lrc` line-synced).
-  7. `musixmatch` – Musixmatch Desktop API (RichSync word-sync `.ttml` oraz `.lrc`).
-  8. `qqmusic` – QQ Music / Tencent API (QRC word-sync `.ttml` oraz `.lrc`).
-  9. `kuwo` – Kuwo Music API (`.lrc`).
-  10. `netease` – NetEase Cloud Music 163 API (YRC word-sync `.ttml` oraz `.lrc`).
-  11. `kugou` – Kugou Music API (KRC word-sync `.ttml` oraz `.lrc`).
-  12. `lyricsify` – Baza Lyricsify (wsparcie FlareSolverr).
-  13. `genius` – Genius API + HTML Scraper (opcjonalny niesynchroniczny fallback).
+- **Kaskada priorytetów (Quality Cascade) – 14 dostawców:**
+  1. `spicylyrics` – Spicy Lyrics Developer API (word-sync `.ttml` na poziomie sylab oraz `.lrc`).
+  2. `amll` – Apple Music-Like Lyrics DB (`.ttml` z sylabami i wieloma wokalistami).
+  3. `apple_music` – Apple Music Catalog / AMLL (`.ttml`).
+  4. `rmmrevival` – RMM Revival / Apple Music Worker (word-sync `.ttml` oraz `.lrc`).
+  5. `unison` – Społecznościowe API Better Lyrics Unison (`.ttml` / `.yaml` / `.lrc`).
+  6. `binilyrics` – BiniLyrics / Aligned REST API (`.ttml` / `.lrc`).
+  7. `lrclib` – LRCLIB Database (`.yaml` word-synced oraz `.lrc` line-synced).
+  8. `musixmatch` – Musixmatch Desktop API (RichSync word-sync `.ttml` oraz `.lrc`).
+  9. `qqmusic` – QQ Music / Tencent API (QRC word-sync `.ttml` oraz `.lrc`).
+  10. `kuwo` – Kuwo Music API (`.lrc`).
+  11. `netease` – NetEase Cloud Music 163 API (YRC word-sync `.ttml` oraz `.lrc`).
+  12. `kugou` – Kugou Music API (KRC word-sync `.ttml` oraz `.lrc`).
+  13. `lyricsify` – Baza Lyricsify (wsparcie FlareSolverr).
+  14. `genius` – Genius API + HTML Scraper (opcjonalny niesynchroniczny fallback).
 
 - **Elastyczne przechowywanie i zapis w tagach audio (Embedded Lyrics):**
   - **Pliki sidecar:** Atomowy zapis plików towarzyszących (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) z hierarchią jakości (`.ttml` > `.yaml` > `.lrc`).
@@ -215,6 +216,7 @@ navidrome:
 
 # Aktywni dostawcy (kolejność określa priorytet)
 enabled_providers:
+  - "spicylyrics"
   - "amll"
   - "apple_music"
   - "rmmrevival"
@@ -235,6 +237,8 @@ Wszystkie opcje można również przekazać za pomocą zmiennych środowiskowych
 - `NLA_STORAGE_MODE` – Tryb zapisu: `sidecar`, `embedded` lub `both`
 - `NLA_EMBED_WORD_SYNC` – Osadzanie synchronizacji słownej (Enhanced LRC) w tagach audio (`true`/`false`)
 - `NLA_OUTPUT_DIR` – Dedykowany folder na pliki tekstów
+- `SPICY_LYRICS_SECRET_KEY` lub `NLA_SPICY_LYRICS_API_KEY` – Klucz API Spicy Lyrics (`sl_sk_...`)
+- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` – Opcjonalne poświadczenia Spotify API do automatycznego mapowania utworów
 - `NLA_SCAN_INTERVAL` – Częstotliwość skanowania w trybie demona (`1h`, `30m`, `3600s`)
 - `NLA_CONCURRENCY` – Liczba współbieżnych zadań (domyślnie: `4`)
 - `NLA_OVERWRITE` – Nadpisywanie istniejących tekstów (`true`/`false`)
@@ -245,8 +249,32 @@ Wszystkie opcje można również przekazać za pomocą zmiennych środowiskowych
 - `NLA_NAVIDROME_AUTO_SCAN` – Automatyczne wyzwalanie skanu w Navidrome (`true`/`false`)
 - `NLA_LOG_LEVEL` – Poziom szczegółowości logów (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
 
+### 🔑 Konfiguracja klucza API Spicy Lyrics
+
+Spicy Lyrics to dostawca o najwyższym priorytecie oferujący teksty TTML z precyzyjną synchronizacją sylabową (Word-Sync), chórkami i obsługą duetów z baz Spotify i Apple Music.
+
+**Uzyskanie klucza API jest darmowe i zajmuje mniej niż minutę:**
+1. Wejdź do panelu deweloperskiego [Spicy Lyrics Developer Dashboard](https://developers.spicylyrics.org/dashboard) i zaloguj się za pomocą konta Discord lub GitHub.
+2. W zakładce **API Keys** kliknij **Create Key** (wygeneruj klucz Secret Key).
+3. Skopiuj wygenerowany klucz (rozpoczyna się od `sl_sk_...`).
+4. Dodaj klucz do projektu na jeden z dwóch sposobów:
+   - W pliku `.env`:
+     ```env
+     SPICY_LYRICS_SECRET_KEY=sl_sk_twoj_klucz
+     ```
+   - Lub w `config.yaml` / `config.local.yaml`:
+     ```yaml
+     providers:
+       spicylyrics:
+         enabled: true
+         api_key: "sl_sk_twoj_klucz"
+     ```
+
+> [!NOTE]
+> Agregator działa bez problemu nawet bez klucza Spicy Lyrics! W przypadku braku klucza usługa zostanie po prostu pominięta, a teksty zostaną pobrane z pozostałych 12 darmowych i otwartych dostawców (m.in. AMLL, RMM Revival, Unison, LRCLIB).
+
 > [!TIP]
-> Jeśli posiadasz własne hasła, tokeny API lub niestandardowe ścieżki, umieść je w `config.local.yaml`. Plik ten jest automatycznie ignorowany przez Git i nie trafi do repozytorium.
+> Jeśli posiadasz własne hasła, tokeny API lub niestandardowe ścieżki, umieść je w `config.local.yaml` lub `.env`. Pliki te są automatycznie ignorowane przez Git i nie trafią do repozytorium.
 
 ---
 

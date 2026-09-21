@@ -282,7 +282,7 @@ export class TTMLRenderer {
           this.seekTo(lb);
         });
 
-        const processedTokens = isAdlib ? this.stripParensFromTokens(tokenList) : tokenList;
+        const processedTokens = tokenList;
 
         let i = 0;
         while (i < processedTokens.length) {

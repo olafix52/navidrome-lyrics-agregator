@@ -4,8 +4,8 @@ import json
 import logging
 import time
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from typing import Any, Dict, List, Optional
+from src.ttml import format_ttml_document
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
 from src.normalizer import calculate_candidate_score, clean_artist, clean_title, safe_float
 from src.providers.base import BaseLyricsProvider
@@ -115,8 +115,7 @@ def convert_richsync_to_ttml(richsync_data: Any, title: str, artist: str) -> Opt
             })
             span.text = text
 
-    xml_bytes = ET.tostring(tt, encoding="utf-8")
-    return minidom.parseString(xml_bytes).toprettyxml(indent="  ")
+    return format_ttml_document(tt)
 
 
 class MusixmatchProvider(BaseLyricsProvider):

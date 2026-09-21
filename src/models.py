@@ -107,6 +107,7 @@ class TrackMetadata(BaseModel):
     disc_number: Optional[int] = None
     isrc: Optional[str] = None
     musicbrainz_trackid: Optional[str] = None
+    spotify_id: Optional[str] = None
     clean_title: Optional[str] = None
     clean_artist: Optional[str] = None
     has_embedded_lyrics: Optional[bool] = None
