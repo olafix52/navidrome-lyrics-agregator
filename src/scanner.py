@@ -13,7 +13,7 @@ from src.matcher import LyricsMatcher
 from src.models import MatchStatus, ProcessResult, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.subsonic import SubsonicClient
-from src.tag_reader import is_supported_audio_file, read_track_metadata
+from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, read_track_metadata
 
 logger = logging.getLogger("nla.scanner")
 
@@ -27,22 +27,8 @@ class LibraryScanner:
         self.semaphore = asyncio.Semaphore(max(1, config.concurrency))
 
     def discover_audio_files(self, root_dir: Path) -> List[Path]:
-        """Find all supported audio files in the target directory recursively."""
-        if not root_dir.exists():
-            logger.error(f"Music directory does not exist: {root_dir}")
-            return []
-
-        audio_files: List[Path] = []
-        if root_dir.is_file():
-            if is_supported_audio_file(root_dir):
-                return [root_dir]
-            return []
-
-        for p in root_dir.rglob("*"):
-            if p.is_file() and is_supported_audio_file(p):
-                audio_files.append(p)
-
-        return sorted(audio_files)
+        """Find all supported audio files in the target directory recursively using fast os.scandir."""
+        return fast_discover_audio_files(root_dir)
 
     async def _process_items_bounded(
         self,

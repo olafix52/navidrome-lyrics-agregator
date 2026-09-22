@@ -1,5 +1,6 @@
 """Navidrome / Subsonic API client for library scanning, track discovery, and scan triggers."""
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -165,16 +166,22 @@ class SubsonicClient:
                 if not album_list:
                     break
 
-                for alb in album_list:
-                    alb_id = alb.get("id")
-                    if not alb_id:
-                        continue
-                    try:
-                        alb_resp = await self._get("getAlbum.view", extra_params={"id": alb_id})
-                        for s in alb_resp.get("album", {}).get("song", []):
-                            tracks.append(self._parse_song_to_track(s))
-                    except Exception as err:
-                        logger.debug(f"Could not load album {alb_id}: {err}")
+                sem = asyncio.Semaphore(10)
+
+                async def _fetch_album_songs(alb_id: str) -> List[Dict[str, Any]]:
+                    async with sem:
+                        try:
+                            alb_resp = await self._get("getAlbum.view", extra_params={"id": alb_id})
+                            return alb_resp.get("album", {}).get("song", [])
+                        except Exception as err:
+                            logger.debug(f"Could not load album {alb_id}: {err}")
+                            return []
+
+                album_ids = [alb.get("id") for alb in album_list if alb.get("id")]
+                albums_songs = await asyncio.gather(*(_fetch_album_songs(aid) for aid in album_ids))
+                for songs in albums_songs:
+                    for s in songs:
+                        tracks.append(self._parse_song_to_track(s))
 
                 if len(album_list) < album_batch:
                     break

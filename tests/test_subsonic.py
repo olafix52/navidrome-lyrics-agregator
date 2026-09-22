@@ -173,6 +173,52 @@ async def test_subsonic_get_all_tracks_fallback_to_albums():
 
 
 @pytest.mark.asyncio
+async def test_subsonic_get_all_tracks_fallback_multiple_albums_concurrent():
+    client = SubsonicClient("http://localhost:4533", "user", "pass")
+
+    async def fake_get(endpoint: str, extra_params=None):
+        if endpoint == "search3.view":
+            raise RuntimeError("search3 not supported")
+        elif endpoint == "getAlbumList2.view":
+            return {
+                "status": "ok",
+                "albumList2": {
+                    "album": [
+                        {"id": "alb-1", "name": "Album 1"},
+                        {"id": "alb-2", "name": "Album 2"},
+                        {"id": "alb-3", "name": "Album 3"},
+                    ],
+                },
+            }
+        elif endpoint == "getAlbum.view":
+            alb_id = extra_params.get("id", "")
+            return {
+                "status": "ok",
+                "album": {
+                    "song": [
+                        {
+                            "id": f"song-{alb_id}",
+                            "title": f"Song in {alb_id}",
+                            "artist": "Test Artist",
+                            "duration": 180,
+                            "path": f"path/{alb_id}.mp3",
+                            "suffix": "mp3",
+                        }
+                    ]
+                },
+            }
+        return {"status": "ok"}
+
+    with patch.object(client, "_get", side_effect=fake_get):
+        tracks = await client.get_all_tracks(batch_size=500)
+        assert len(tracks) == 3
+        ids = [t.id for t in tracks]
+        assert ids == ["song-alb-1", "song-alb-2", "song-alb-3"]
+
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_subsonic_error_handling():
     client = SubsonicClient("http://localhost:4533", "user", "pass")
     mock_resp = MagicMock()

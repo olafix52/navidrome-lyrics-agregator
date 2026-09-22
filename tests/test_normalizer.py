@@ -177,3 +177,44 @@ def test_safe_float():
     assert safe_float(0, 0.0) is None
     assert safe_float(0, 99.0) == 99.0
 
+
+def test_normalizer_lru_cache():
+    """Verify that LRU caches are active and correctly cache repeated calls."""
+    from src.normalizer import (
+        _calculate_string_similarity_cached,
+        calculate_candidate_score,
+        calculate_string_similarity,
+        clean_artist,
+        clean_title,
+    )
+
+    clean_title.cache_clear()
+    clean_artist.cache_clear()
+    _calculate_string_similarity_cached.cache_clear()
+    calculate_candidate_score.cache_clear()
+
+    # Repeated clean_title
+    res1 = clean_title("Song Title (Remastered)")
+    res2 = clean_title("Song Title (Remastered)")
+    assert res1 == res2
+    assert clean_title.cache_info().hits >= 1
+
+    # Repeated clean_artist
+    a1 = clean_artist("Queen feat. David Bowie")
+    a2 = clean_artist("Queen feat. David Bowie")
+    assert a1 == a2
+    assert clean_artist.cache_info().hits >= 1
+
+    # Symmetric similarity caching: (A, B) and (B, A) share the same cache entry
+    sim1 = calculate_string_similarity("Bohemian Rhapsody", "Bohemian")
+    sim2 = calculate_string_similarity("Bohemian", "Bohemian Rhapsody")
+    assert sim1 == sim2
+    assert _calculate_string_similarity_cached.cache_info().hits >= 1
+
+    # Candidate score caching
+    c1 = calculate_candidate_score("Title", "Artist", "Title", "Artist")
+    c2 = calculate_candidate_score("Title", "Artist", "Title", "Artist")
+    assert c1 == c2
+    assert calculate_candidate_score.cache_info().hits >= 1
+
+

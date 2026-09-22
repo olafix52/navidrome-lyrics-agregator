@@ -1,5 +1,6 @@
 """Metadata normalization, string sanitization, and duration verification algorithms."""
 
+from functools import lru_cache
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -48,6 +49,7 @@ TITLE_CLEANUP_PATTERNS = [
 TRACK_NUM_PREFIX_PATTERN = re.compile(r"^\s*(?:\d{1,3}\s*[\.\-_]\s*|\b0\d{1,2}\s+)")
 
 
+@lru_cache(maxsize=16384)
 def normalize_unicode(text: str) -> str:
     """Normalize text using NFKC normalization and clean odd whitespace."""
     if not text:
@@ -60,6 +62,7 @@ def normalize_unicode(text: str) -> str:
     return normalized.strip()
 
 
+@lru_cache(maxsize=16384)
 def clean_title(title: str) -> str:
     """Clean track title by removing annotations, remasters, bonus tags, and features."""
     if not title:
@@ -80,6 +83,7 @@ def clean_title(title: str) -> str:
     return text
 
 
+@lru_cache(maxsize=16384)
 def clean_artist(artist: str) -> str:
     """Clean artist name by removing secondary features and standardizing separators."""
     if not artist:
@@ -122,6 +126,7 @@ KNOWN_ARTIST_ALIASES = {
 }
 
 
+@lru_cache(maxsize=16384)
 def extract_primary_artist(artist: str) -> str:
     """Extract primary artist from a composite artist string (e.g., 'Queen & David Bowie' -> 'Queen')."""
     cleaned = clean_artist(artist)
@@ -135,6 +140,7 @@ def extract_primary_artist(artist: str) -> str:
     return primary
 
 
+@lru_cache(maxsize=16384)
 def calculate_artist_similarity(target_artist: str, candidate_artist: str) -> float:
     """Calculate normalized similarity between target and candidate artist names.
     
@@ -210,14 +216,9 @@ def is_duration_matching(
     return diff <= tolerance_seconds
 
 
-def calculate_string_similarity(str1: str, str2: str) -> float:
-    """Calculate normalized string similarity score between 0.0 and 1.0."""
-    if not str1 or not str2:
-        return 0.0
-
-    s1 = normalize_unicode(str1).lower()
-    s2 = normalize_unicode(str2).lower()
-
+@lru_cache(maxsize=16384)
+def _calculate_string_similarity_cached(s1: str, s2: str) -> float:
+    """Internal cached helper for normalized string similarity."""
     if s1 == s2:
         return 1.0
 
@@ -248,6 +249,25 @@ def calculate_string_similarity(str1: str, str2: str) -> float:
     return max(seq_ratio, token_ratio, containment_ratio)
 
 
+def calculate_string_similarity(str1: str, str2: str) -> float:
+    """Calculate normalized string similarity score between 0.0 and 1.0."""
+    if not str1 or not str2:
+        return 0.0
+
+    s1 = normalize_unicode(str1).lower()
+    s2 = normalize_unicode(str2).lower()
+
+    if s1 == s2:
+        return 1.0
+
+    # Enforce symmetric canonical ordering to maximize cache hits
+    if s1 > s2:
+        s1, s2 = s2, s1
+
+    return _calculate_string_similarity_cached(s1, s2)
+
+
+@lru_cache(maxsize=16384)
 def calculate_candidate_score(
     target_title: str,
     target_artist: str,

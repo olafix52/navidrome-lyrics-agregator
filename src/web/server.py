@@ -19,7 +19,7 @@ from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
 from src.storage import get_existing_lyrics_file, save_lyrics_sidecar
-from src.tag_reader import is_supported_audio_file, read_track_metadata
+from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, read_track_metadata
 from src.web.parser import karaoke_to_ttml, parse_lyrics_to_karaoke
 
 logger = logging.getLogger("nla.web")
@@ -124,7 +124,7 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
         if not music_dir.exists():
             return {"total": 0, "page": page, "limit": limit, "tracks": []}
 
-        all_audio = sorted([p for p in music_dir.rglob("*") if p.is_file() and is_supported_audio_file(p)])
+        all_audio = fast_discover_audio_files(music_dir)
 
         items: List[Dict[str, Any]] = []
         for p in all_audio:

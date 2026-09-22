@@ -12,7 +12,7 @@ from rich.table import Table
 from src.logger import console
 from src.models import LyricsFormat, LyricsSyncType, detect_sync_type
 from src.storage import LYRICS_EXTENSIONS_PRIORITY, get_existing_lyrics_file
-from src.tag_reader import SUPPORTED_AUDIO_EXTENSIONS, is_supported_audio_file, read_track_metadata
+from src.tag_reader import SUPPORTED_AUDIO_EXTENSIONS, fast_discover_audio_files, is_supported_audio_file, read_track_metadata
 
 logger = logging.getLogger("nla.audit")
 
@@ -98,10 +98,7 @@ class LibraryAuditor:
             logger.error(f"Directory does not exist: {root_dir}")
             return report
 
-        if root_dir.is_file():
-            audio_files = [root_dir] if is_supported_audio_file(root_dir) else []
-        else:
-            audio_files = sorted([p for p in root_dir.rglob("*") if p.is_file() and is_supported_audio_file(p)])
+        audio_files = fast_discover_audio_files(root_dir)
 
         report.total_tracks = len(audio_files)
 
@@ -349,10 +346,7 @@ class LibraryPruner:
             List of (obsolete_file_to_delete, kept_higher_quality_file)
         """
         duplicates: List[Tuple[Path, Path]] = []
-        if not root_dir.exists():
-            return duplicates
-
-        audio_files = [p for p in root_dir.rglob("*") if p.is_file() and is_supported_audio_file(p)]
+        audio_files = fast_discover_audio_files(root_dir)
 
         for audio_path in audio_files:
             # Collect all sidecars present for this audio file

@@ -80,6 +80,43 @@ async def test_scanner_discover_and_summary(tmp_path: Path):
     scanner.display_summary(dummy_results)
 
 
+def test_fast_discover_audio_files(tmp_path: Path):
+    from src.tag_reader import fast_discover_audio_files
+
+    # 1. Non-existent path
+    assert fast_discover_audio_files(tmp_path / "does_not_exist") == []
+
+    # 2. Nested directory with audio and non-audio files
+    album1 = tmp_path / "Artist" / "Album1"
+    album2 = tmp_path / "Artist" / "Album2"
+    album1.mkdir(parents=True)
+    album2.mkdir(parents=True)
+
+    f1 = album1 / "01.flac"
+    f2 = album1 / "02.opus"
+    f3 = album2 / "01.mp3"
+    non_audio1 = album1 / "cover.jpg"
+    non_audio2 = album2 / "lyrics.lrc"
+
+    f1.write_bytes(b"flac")
+    f2.write_bytes(b"opus")
+    f3.write_bytes(b"mp3")
+    non_audio1.write_bytes(b"jpg")
+    non_audio2.write_bytes(b"lrc")
+
+    discovered = fast_discover_audio_files(tmp_path)
+    assert len(discovered) == 3
+    assert f1 in discovered
+    assert f2 in discovered
+    assert f3 in discovered
+    assert non_audio1 not in discovered
+    assert non_audio2 not in discovered
+
+    # 3. Single file as root_dir
+    assert fast_discover_audio_files(f1) == [f1]
+    assert fast_discover_audio_files(non_audio1) == []
+
+
 @pytest.mark.asyncio
 async def test_watchdog_event_handler(tmp_path: Path):
     loop = asyncio.get_running_loop()
