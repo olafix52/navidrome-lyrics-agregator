@@ -17,6 +17,7 @@ class LyricsifyProvider(BaseLyricsProvider):
 
     name = "lyricsify"
     description = "Lyricsify Community Database (synced LRC lyrics)"
+    supports_word_sync = False
 
     DEFAULT_BASE_URL = "https://www.lyricsify.com"
 

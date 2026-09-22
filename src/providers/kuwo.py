@@ -63,6 +63,7 @@ class KuwoProvider(BaseLyricsProvider):
 
     name = "kuwo"
     description = "Kuwo Music (synced LRC lyrics)"
+    supports_word_sync = False
 
     DEFAULT_SEARCH_URL = "https://search.kuwo.cn/r.s"
     DEFAULT_LYRIC_URL = "https://newlyric.kuwo.cn/newlyric.lrc"

@@ -18,6 +18,8 @@ class BaseLyricsProvider(ABC):
 
     name: str = "base"
     description: str = "Base lyrics provider"
+    supports_word_sync: bool = True
+    supports_line_sync: bool = True
 
     def __init__(
         self,

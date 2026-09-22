@@ -78,6 +78,14 @@ class AppConfig(BaseModel):
     upgrade_quality: bool = Field(default=True, description="Upgrade from LRC to TTML/YAML if higher quality is found")
     dry_run: bool = Field(default=False, description="Scan and search without writing files to disk")
     allow_plain_lyrics: bool = Field(default=False, description="Allow falling back to unsynced plain lyrics if no synced found")
+    early_exit_on_line_sync: bool = Field(
+        default=False,
+        description="Stop cascade immediately when a verified line-sync match is found without searching for word-sync",
+    )
+    word_sync_search_budget: Optional[int] = Field(
+        default=None,
+        description="Maximum additional word-sync providers to query after a verified line-sync match is found (None for unlimited)",
+    )
 
     # Navidrome server integration
     navidrome: NavidromeConfig = Field(

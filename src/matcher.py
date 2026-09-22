@@ -49,8 +49,34 @@ class LyricsMatcher:
 
         # 2. Iterate through provider cascade with quality priority (WORD_SYNC > LINE_SYNC > UNSYNCED)
         best_match = None  # Tuple[LyricsResult, BaseLyricsProvider, float]
+        remaining_word_sync_budget = getattr(self.config, "word_sync_search_budget", None)
+        early_exit = getattr(self.config, "early_exit_on_line_sync", False)
 
         for provider in self.providers:
+            # Skip plain-only providers if allow_plain_lyrics is False
+            if not self.config.allow_plain_lyrics and not getattr(provider, "supports_line_sync", True) and not getattr(provider, "supports_word_sync", True):
+                logger.debug(f"[{provider.name}] Skipping: plain lyrics disabled (allow_plain_lyrics=False)")
+                continue
+
+            # If we already matched LINE_SYNC, optimize the remaining cascade
+            if best_match and best_match[0].sync_type == LyricsSyncType.LINE_SYNC:
+                # 1. Early exit flag: stop immediately once line sync is in hand
+                if early_exit:
+                    logger.debug(f"[CASCADE] Early exit on line-sync active, ending cascade before {provider.name}")
+                    break
+
+                # 2. Capability pruning: skip providers that cannot produce word-sync
+                if not getattr(provider, "supports_word_sync", True):
+                    logger.debug(f"[{provider.name}] Skipping: cannot produce word-sync and line-sync already matched")
+                    continue
+
+                # 3. Budget enforcement: stop if word-sync budget exhausted
+                if remaining_word_sync_budget is not None:
+                    if remaining_word_sync_budget <= 0:
+                        logger.debug(f"[CASCADE] Word-sync search budget reached, ending cascade before {provider.name}")
+                        break
+                    remaining_word_sync_budget -= 1
+
             try:
                 logger.debug(f"[{provider.name}] Querying for '{track.display_name()}'...")
                 lyrics = await provider.get_lyrics(track)

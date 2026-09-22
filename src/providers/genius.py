@@ -16,6 +16,8 @@ class GeniusProvider(BaseLyricsProvider):
 
     name = "genius"
     description = "Genius Database (plain lyrics scraper)"
+    supports_word_sync = False
+    supports_line_sync = False
 
     DEFAULT_SEARCH_URL = "https://genius.com/api/search/multi"
     GENIUS_API_URL = "https://api.genius.com/search"

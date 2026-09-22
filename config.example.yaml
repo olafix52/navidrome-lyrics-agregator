@@ -35,6 +35,12 @@ dry_run: false
 # Allow falling back to unsynced plain text lyrics if no synchronized lyrics are found
 allow_plain_lyrics: false
 
+# Early exit on line sync: stop cascade immediately once verified line-sync lyrics are found
+early_exit_on_line_sync: false
+
+# Word-sync search budget: maximum additional word-sync providers to check after line-sync is found (null for unlimited)
+word_sync_search_budget: null
+
 # Concurrency and network settings
 concurrency: 4
 network_timeout: 10.0

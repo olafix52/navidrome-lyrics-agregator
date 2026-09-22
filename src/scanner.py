@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 
@@ -44,17 +44,28 @@ class LibraryScanner:
 
         return sorted(audio_files)
 
-    async def process_files(
+    async def _process_items_bounded(
         self,
-        audio_files: List[Path],
+        items: List[Any],
+        process_fn: Callable[[Any], Any],
+        description: str,
         show_progress: bool = True,
     ) -> List[ProcessResult]:
-        """Process a list of audio files concurrently and download missing/upgraded lyrics."""
-        total_files = len(audio_files)
-        if total_files == 0:
+        """Process a list of items using a bounded worker pool for constant memory footprint."""
+        total = len(items)
+        if total == 0:
             return []
 
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        for item in items:
+            queue.put_nowait(item)
+
         results: List[ProcessResult] = []
+        results_lock = asyncio.Lock()
+        worker_count = min(max(1, self.config.concurrency), total)
+
+        progress: Optional[Progress] = None
+        task_id = None
 
         if show_progress:
             progress = Progress(
@@ -68,36 +79,32 @@ class LibraryScanner:
                 console=console,
             )
 
-            with progress:
-                task_id = progress.add_task("[cyan]Processing tracks...", total=total_files)
-
-                async def _worker(file_path: Path) -> ProcessResult:
-                    async with self.semaphore:
-                        res = await self._process_single_file(file_path)
+        async def _worker() -> None:
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    res = await process_fn(item)
+                    if isinstance(res, ProcessResult):
+                        async with results_lock:
+                            results.append(res)
+                except Exception as e:
+                    logger.error(f"Task failed: {e}")
+                finally:
+                    if progress and task_id is not None:
                         progress.advance(task_id, 1)
-                        return res
+                    queue.task_done()
 
-                tasks = [_worker(fp) for fp in audio_files]
-                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-                results = []
-                for r in raw_results:
-                    if isinstance(r, Exception):
-                        logger.error(f"Task failed: {r}")
-                    else:
-                        results.append(r)
+        if progress:
+            with progress:
+                task_id = progress.add_task(description, total=total)
+                workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+                await asyncio.gather(*workers)
         else:
-            async def _worker_no_prog(file_path: Path) -> ProcessResult:
-                async with self.semaphore:
-                    return await self._process_single_file(file_path)
-
-            tasks = [_worker_no_prog(fp) for fp in audio_files]
-            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-            results = []
-            for r in raw_results:
-                if isinstance(r, Exception):
-                    logger.error(f"Task failed: {r}")
-                else:
-                    results.append(r)
+            workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+            await asyncio.gather(*workers)
 
         self.display_summary(results)
 
@@ -107,67 +114,31 @@ class LibraryScanner:
 
         return results
 
+    async def process_files(
+        self,
+        audio_files: List[Path],
+        show_progress: bool = True,
+    ) -> List[ProcessResult]:
+        """Process a list of audio files concurrently and download missing/upgraded lyrics."""
+        return await self._process_items_bounded(
+            items=audio_files,
+            process_fn=self._process_single_file,
+            description="[cyan]Processing tracks...",
+            show_progress=show_progress,
+        )
+
     async def process_metadata_batch(
         self,
         metadata_list: List[TrackMetadata],
         show_progress: bool = True,
     ) -> List[ProcessResult]:
         """Process a list of TrackMetadata objects concurrently (e.g. from Subsonic API)."""
-        total_tracks = len(metadata_list)
-        if total_tracks == 0:
-            return []
-
-        results: List[ProcessResult] = []
-
-        if show_progress:
-            progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TextColumn("({task.completed}/{task.total})"),
-                TimeElapsedColumn(),
-                TimeRemainingColumn(),
-                console=console,
-            )
-
-            with progress:
-                task_id = progress.add_task("[cyan]Processing Subsonic tracks...", total=total_tracks)
-
-                async def _worker(meta: TrackMetadata) -> ProcessResult:
-                    async with self.semaphore:
-                        res = await self.matcher.process_track(meta)
-                        progress.advance(task_id, 1)
-                        return res
-
-                tasks = [_worker(m) for m in metadata_list]
-                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-                results = []
-                for r in raw_results:
-                    if isinstance(r, Exception):
-                        logger.error(f"Task failed: {r}")
-                    else:
-                        results.append(r)
-        else:
-            async def _worker_no_prog(meta: TrackMetadata) -> ProcessResult:
-                async with self.semaphore:
-                    return await self.matcher.process_track(meta)
-
-            tasks = [_worker_no_prog(m) for m in metadata_list]
-            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-            results = []
-            for r in raw_results:
-                if isinstance(r, Exception):
-                    logger.error(f"Task failed: {r}")
-                else:
-                    results.append(r)
-
-        self.display_summary(results)
-
-        success_count = sum(1 for r in results if r.status == MatchStatus.SUCCESS)
-        await self._maybe_trigger_navidrome_scan(success_count)
-
-        return results
+        return await self._process_items_bounded(
+            items=metadata_list,
+            process_fn=self.matcher.process_track,
+            description="[cyan]Processing Subsonic tracks...",
+            show_progress=show_progress,
+        )
 
     async def _maybe_trigger_navidrome_scan(self, success_count: int) -> None:
         """Trigger library scan on Navidrome server if configured and new lyrics were saved."""

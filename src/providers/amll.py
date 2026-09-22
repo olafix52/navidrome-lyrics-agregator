@@ -19,6 +19,7 @@ class AMLLProvider(BaseLyricsProvider):
 
     name = "amll"
     description = "Apple Music-Like Lyrics Database (TTML with syllable-level sync)"
+    supports_line_sync = False
 
     DEFAULT_API_BASE = "https://api.amll.dev"
 

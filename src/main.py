@@ -46,6 +46,10 @@ async def run_scan_command(args: argparse.Namespace, config) -> None:
         config.navidrome.password = args.navidrome_password
     if getattr(args, "auto_scan", False):
         config.navidrome.auto_scan = True
+    if getattr(args, "fast_line_sync", False):
+        config.early_exit_on_line_sync = True
+    if getattr(args, "word_sync_budget", None) is not None:
+        config.word_sync_search_budget = args.word_sync_budget
 
     target_str = getattr(args, "path", None) or getattr(args, "target", None) or getattr(args, "music_dir", None)
     target_path = Path(target_str) if target_str else config.music_dir
@@ -127,6 +131,10 @@ async def run_daemon_command(args: argparse.Namespace, config) -> None:
         config.navidrome.password = args.navidrome_password
     if getattr(args, "auto_scan", False):
         config.navidrome.auto_scan = True
+    if getattr(args, "fast_line_sync", False):
+        config.early_exit_on_line_sync = True
+    if getattr(args, "word_sync_budget", None) is not None:
+        config.word_sync_search_budget = args.word_sync_budget
 
     providers = build_provider_cascade(config)
     matcher = LyricsMatcher(config, providers)
@@ -271,6 +279,8 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
         config.output_dir = Path(args.output_dir)
     if getattr(args, "auto_scan", False):
         config.navidrome.auto_scan = True
+    if getattr(args, "word_sync_budget", None) is not None:
+        config.word_sync_search_budget = args.word_sync_budget
 
     target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
     target_path = Path(target_str) if target_str else config.music_dir
@@ -539,6 +549,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--navidrome-user", type=str, help="Navidrome username")
     scan_p.add_argument("--navidrome-password", type=str, help="Navidrome password")
     scan_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
+    scan_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
+    scan_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
 
     # DAEMON subcommand
     daemon_p = subparsers.add_parser("daemon", parents=[provider_parent], help="Run in daemon mode with periodic scans")
@@ -552,12 +564,16 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument("--navidrome-user", type=str, help="Navidrome username")
     daemon_p.add_argument("--navidrome-password", type=str, help="Navidrome password")
     daemon_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
+    daemon_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
+    daemon_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
 
     # WATCH subcommand
     watch_p = subparsers.add_parser("watch", parents=[provider_parent], help="Watch music directory and fetch lyrics on file events")
     watch_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     watch_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     watch_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
+    watch_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
+    watch_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
 
     # TEST-TRACK subcommand
     test_p = subparsers.add_parser("test-track", parents=[provider_parent], help="Test query against all providers for a single track")
@@ -598,6 +614,7 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
     upgrade_p.add_argument("--output-dir", type=str, help="Custom output directory for saved sidecars")
     upgrade_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after upgrading lyrics")
+    upgrade_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
 
     # PRUNE subcommand
     prune_p = subparsers.add_parser("prune", help="Clean up orphaned sidecars and obsolete duplicate formats")

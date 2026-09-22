@@ -18,6 +18,7 @@ class AppleMusicProvider(BaseLyricsProvider):
 
     name = "apple_music"
     description = "Apple Music Catalog / TTML API"
+    supports_line_sync = False
 
     DEFAULT_AMLL_BRIDGE = "https://api.amll.dev"
     DEFAULT_STOREFRONT = "us"
