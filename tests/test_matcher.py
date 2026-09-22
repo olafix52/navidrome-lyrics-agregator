@@ -325,3 +325,84 @@ async def test_matcher_skips_plain_only_provider_when_allow_plain_false(tmp_path
     assert result.status == MatchStatus.NOT_FOUND
     # Plain-only provider should be completely skipped without even querying
     assert p2_queried is False
+
+
+@pytest.mark.asyncio
+async def test_matcher_negative_cache_workflow(tmp_path: Path):
+    from src.cache import LyricsCache
+    db_file = tmp_path / "cache.db"
+    cache = LyricsCache(db_path=db_file, ttl_days=7.0)
+
+    audio_path = tmp_path / "unfound.mp3"
+    audio_path.write_bytes(b"dummy")
+    track = TrackMetadata(file_path=audio_path, title="Missing", artist="Unknown", duration=150.0)
+
+    query_count = 0
+    p1 = MockProvider("p1", None)
+    orig_get = p1.get_lyrics
+
+    async def counted_get(t):
+        nonlocal query_count
+        query_count += 1
+        return await orig_get(t)
+
+    p1.get_lyrics = counted_get
+
+    config = AppConfig(music_dir=tmp_path)
+    matcher = LyricsMatcher(config, [p1], cache=cache)
+
+    # 1. First run: provider queried, not found, stored in negative cache
+    res1 = await matcher.process_track(track)
+    assert res1.status == MatchStatus.NOT_FOUND
+    assert query_count == 1
+    assert await cache.is_negative_hit(track) is not None
+
+    # 2. Second run: negative cache hit -> SKIPPED without querying provider!
+    res2 = await matcher.process_track(track)
+    assert res2.status == MatchStatus.SKIPPED
+    assert "Negative cache" in (res2.error_message or "")
+    assert query_count == 1  # No additional network query!
+
+    # 3. Third run with ignore_cache: provider queried again
+    config.ignore_cache = True
+    res3 = await matcher.process_track(track)
+    assert res3.status == MatchStatus.NOT_FOUND
+    assert query_count == 2
+
+
+@pytest.mark.asyncio
+async def test_matcher_invalidates_negative_cache_on_success(tmp_path: Path):
+    from src.cache import LyricsCache
+    db_file = tmp_path / "cache_invalidate.db"
+    cache = LyricsCache(db_path=db_file, ttl_days=7.0)
+
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    track = TrackMetadata(file_path=audio_path, title="Found Song", artist="Artist", duration=200.0)
+
+    # Pre-populate negative cache
+    await cache.record_negative(track)
+    assert await cache.is_negative_hit(track) is not None
+
+    p1 = MockProvider(
+        "p1",
+        LyricsResult(
+            content="[00:10.00]Hello world",
+            format=LyricsFormat.LRC,
+            sync_type=LyricsSyncType.LINE_SYNC,
+            provider_name="p1",
+            duration=200.0,
+            title="Found Song",
+            artist="Artist",
+        ),
+    )
+
+    # When ignore_cache is true, we re-check and find lyrics
+    config = AppConfig(music_dir=tmp_path, ignore_cache=True)
+    matcher = LyricsMatcher(config, [p1], cache=cache)
+
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    # Negative cache entry must now be deleted
+    assert await cache.is_negative_hit(track) is None
+

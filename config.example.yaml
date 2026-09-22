@@ -41,6 +41,12 @@ early_exit_on_line_sync: false
 # Word-sync search budget: maximum additional word-sync providers to check after line-sync is found (null for unlimited)
 word_sync_search_budget: null
 
+# Persistent negative caching (SQLite database to remember tracks without lyrics)
+cache:
+  enabled: true                    # Enable negative caching to skip unfound tracks in subsequent scans
+  db_path: "data/lyrics_cache.db"  # Path to SQLite database file
+  negative_ttl_days: 14            # Days to remember tracks with no lyrics before querying providers again
+
 # Concurrency and network settings
 concurrency: 4
 network_timeout: 10.0

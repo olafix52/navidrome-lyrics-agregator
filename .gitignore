@@ -25,6 +25,9 @@ dist/
 htmlcov/
 .tox/
 .cache/
+*.db
+*.db-wal
+*.db-shm
 
 # Local configuration and credentials
 config.local.yaml

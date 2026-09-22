@@ -521,7 +521,27 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
             "persisted_to": saved_file,
         }
 
-    # 8. SERVE STATIC ASSETS AND SPA INDEX
+    # 8. CACHE MANAGEMENT ENDPOINTS
+    @app.get("/api/cache")
+    async def get_cache_info():
+        """Fetch statistics of the persistent SQLite negative lyrics cache."""
+        matcher = get_or_create_matcher()
+        if not matcher.cache:
+            return {"enabled": False}
+        stats = await matcher.cache.get_stats()
+        stats["enabled"] = True
+        return stats
+
+    @app.post("/api/cache/clear")
+    async def clear_cache_info(expired_only: bool = False):
+        """Clear cache entries, optionally only expired ones."""
+        matcher = get_or_create_matcher()
+        if not matcher.cache:
+            return {"enabled": False, "deleted": 0}
+        deleted = await matcher.cache.clear(expired_only=expired_only)
+        return {"enabled": True, "deleted": deleted}
+
+    # 9. SERVE STATIC ASSETS AND SPA INDEX
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

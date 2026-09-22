@@ -26,10 +26,15 @@ async def run_scan_command(args: argparse.Namespace, config) -> None:
     """Execute one-time library scan."""
     if getattr(args, "force", False):
         config.overwrite = True
+        config.ignore_cache = True
     if getattr(args, "dry_run", False):
         config.dry_run = True
     if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
+    if getattr(args, "no_cache", False):
+        config.ignore_cache = True
+    if getattr(args, "cache_db", None):
+        config.cache.db_path = Path(args.cache_db)
     if getattr(args, "concurrency", None):
         config.concurrency = args.concurrency
     if getattr(args, "music_dir", None):
@@ -119,6 +124,10 @@ async def run_daemon_command(args: argparse.Namespace, config) -> None:
         config.scan_interval = args.interval
     if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
+    if getattr(args, "no_cache", False):
+        config.ignore_cache = True
+    if getattr(args, "cache_db", None):
+        config.cache.db_path = Path(args.cache_db)
     if getattr(args, "storage_mode", None):
         config.storage_mode = args.storage_mode
     if getattr(args, "output_dir", None):
@@ -176,8 +185,12 @@ async def run_watch_command(args: argparse.Namespace, config) -> None:
     """Execute real-time filesystem watcher mode."""
     if args.music_dir:
         config.music_dir = Path(args.music_dir)
-    if args.allow_plain:
+    if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
+    if getattr(args, "no_cache", False):
+        config.ignore_cache = True
+    if getattr(args, "cache_db", None):
+        config.cache.db_path = Path(args.cache_db)
 
     providers = build_provider_cascade(config)
     matcher = LyricsMatcher(config, providers)
@@ -240,6 +253,40 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
     await matcher.close()
 
 
+async def run_cache_command(args: argparse.Namespace, config) -> None:
+    """Manage SQLite persistent negative lyrics cache."""
+    from src.cache import LyricsCache
+    from rich.table import Table
+
+    cache_path = getattr(args, "cache_db", None) or config.cache.db_path
+    cache = LyricsCache(db_path=cache_path, ttl_days=config.cache.negative_ttl_days)
+
+    if getattr(args, "clear", False):
+        deleted = await cache.clear(expired_only=False)
+        console.print(f"[bold green]✓ Cleared negative cache:[/bold green] removed {deleted} entries.")
+        return
+
+    if getattr(args, "prune", False):
+        deleted = await cache.clear(expired_only=True)
+        console.print(f"[bold green]✓ Pruned expired negative cache entries:[/bold green] removed {deleted} entries.")
+        return
+
+    # Default action: show stats
+    stats = await cache.get_stats()
+    table = Table(title="SQLite Persistent Lyrics Cache Statistics", show_header=True)
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="bold green")
+
+    table.add_row("Database File", str(stats["db_path"]))
+    table.add_row("File Size", f"{stats['db_size_kb']} KB ({stats['db_size_bytes']} bytes)")
+    table.add_row("Negative TTL", f"{stats['ttl_days']} days")
+    table.add_row("Total Negative Entries", str(stats["total_negative_entries"]))
+    table.add_row("Active Entries (within TTL)", str(stats["active_negative_entries"]))
+    table.add_row("Expired Entries", str(stats["expired_negative_entries"]))
+
+    console.print(table)
+
+
 async def run_audit_command(args: argparse.Namespace, config) -> None:
     """Execute offline library audit and coverage reporting."""
     target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
@@ -265,10 +312,15 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
     """Scan and upgrade tracks with missing or lower-quality lyrics (to TTML word-sync)."""
     if getattr(args, "force", False):
         config.overwrite = True
+        config.ignore_cache = True
     if getattr(args, "dry_run", False):
         config.dry_run = True
     if getattr(args, "allow_plain", False):
         config.allow_plain_lyrics = True
+    if getattr(args, "no_cache", False):
+        config.ignore_cache = True
+    if getattr(args, "cache_db", None):
+        config.cache.db_path = Path(args.cache_db)
     if getattr(args, "concurrency", None):
         config.concurrency = args.concurrency
     if getattr(args, "music_dir", None):
@@ -507,6 +559,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated list of providers to enable",
     )
 
+    cache_parent = argparse.ArgumentParser(add_help=False)
+    cache_parent.add_argument(
+        "--no-cache",
+        "--ignore-cache",
+        dest="no_cache",
+        action="store_true",
+        help="Bypass negative cache and force querying all providers",
+    )
+    cache_parent.add_argument(
+        "--cache-db",
+        type=str,
+        default=None,
+        help="Path to SQLite cache database file",
+    )
+
     parser = argparse.ArgumentParser(
         prog="navidrome-lyrics-aggregator",
         description="Sidecar lyrics aggregator service for Navidrome music server",
@@ -533,7 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", help="Operational mode")
 
     # SCAN subcommand
-    scan_p = subparsers.add_parser("scan", parents=[provider_parent], help="Run a one-time scan of the music library")
+    scan_p = subparsers.add_parser("scan", parents=[provider_parent, cache_parent], help="Run a one-time scan of the music library")
     scan_p.add_argument("path", nargs="?", type=str, help="Target folder or file to scan (positional)")
     scan_p.add_argument("-t", "--target", type=str, help="Specific target folder or audio file to scan")
     scan_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
@@ -553,7 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
 
     # DAEMON subcommand
-    daemon_p = subparsers.add_parser("daemon", parents=[provider_parent], help="Run in daemon mode with periodic scans")
+    daemon_p = subparsers.add_parser("daemon", parents=[provider_parent, cache_parent], help="Run in daemon mode with periodic scans")
     daemon_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     daemon_p.add_argument("-i", "--interval", type=str, help="Scan interval (e.g. '1h', '30m', '3600')")
     daemon_p.add_argument("-w", "--with-watch", action="store_true", help="Enable real-time watchdog along with periodic scans")
@@ -568,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
 
     # WATCH subcommand
-    watch_p = subparsers.add_parser("watch", parents=[provider_parent], help="Watch music directory and fetch lyrics on file events")
+    watch_p = subparsers.add_parser("watch", parents=[provider_parent, cache_parent], help="Watch music directory and fetch lyrics on file events")
     watch_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     watch_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     watch_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
@@ -601,7 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     # UPGRADE subcommand
-    upgrade_p = subparsers.add_parser("upgrade", parents=[provider_parent], help="Fetch word-sync TTML lyrics for tracks lacking them")
+    upgrade_p = subparsers.add_parser("upgrade", parents=[provider_parent, cache_parent], help="Fetch word-sync TTML lyrics for tracks lacking them")
     upgrade_p.add_argument("path", nargs="?", type=str, help="Target folder or file to upgrade (positional)")
     upgrade_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
     upgrade_p.add_argument("--only-lrc", action="store_true", help="Only upgrade tracks that already have line-sync/plain lyrics")
@@ -615,6 +682,12 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_p.add_argument("--output-dir", type=str, help="Custom output directory for saved sidecars")
     upgrade_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after upgrading lyrics")
     upgrade_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
+
+    # CACHE subcommand
+    cache_p = subparsers.add_parser("cache", parents=[cache_parent], help="Manage SQLite persistent negative lyrics cache")
+    cache_p.add_argument("--stats", action="store_true", help="Display cache statistics (total, active, expired, size)")
+    cache_p.add_argument("--clear", action="store_true", help="Clear all entries from the negative cache")
+    cache_p.add_argument("--prune", action="store_true", help="Prune only expired entries from the negative cache")
 
     # PRUNE subcommand
     prune_p = subparsers.add_parser("prune", help="Clean up orphaned sidecars and obsolete duplicate formats")
@@ -744,6 +817,8 @@ def main() -> None:
             await run_trigger_scan_command(args, config)
         elif command == "ping-navidrome":
             await run_ping_navidrome_command(args, config)
+        elif command == "cache":
+            await run_cache_command(args, config)
         else:
             parser.print_help()
 

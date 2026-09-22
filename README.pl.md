@@ -54,15 +54,22 @@
   - Zabezpieczenie przed błędnym dopasowaniem czasu utworu (domyślna tolerancja $\pm 2.5$ s).
   - Weryfikacja podobieństwa nazw i wykonawców (Fuzzy String Similarity $\ge 0.75$).
 
+- **Wysokowydajny trwały cache i optymalizacja wydajności:**
+  - **Trwały negatywny cache SQLite (tryb WAL):** Zapamiętuje brakujące teksty oraz nieudane zapytania do dostawców z mechanizmem wykładniczego wycofywania (exponential backoff) i konfigurowalnym czasem wygaśnięcia TTL (`negative_ttl_days: 14`). Kolejne uruchomienia demona lub skanowania biblioteki pomijają nieznane utwory w ułamku milisekundy, eliminując niepotrzebne zapytania sieciowe.
+  - **Nieblokujące asynchroniczne I/O:** Wszystkie operacje dyskowe i CPU (odczyt tagów audio `mutagen`, zapis tekstów, transakcje SQLite) są oddelegowane do wątków roboczych za pomocą `asyncio.to_thread`, gwarantując pełną responsywność pętli zdarzeń.
+  - **Budżet kaskady i szybka synchronizacja:** Flaga `--fast-line-sync` natychmiast akceptuje zsynchronizowany plik LRC bez odpytywania dalszych dostawców; flaga `--word-sync-budget` ogranicza liczbę odpytywanych dostawców word-sync.
+  - **Alokator pamięci Jemalloc:** Kontener Docker wykorzystuje bibliotekę `libjemalloc2`, co drastycznie ogranicza fragmentację pamięci RAM podczas skanowania potężnych zbiorów muzycznych.
+
 - **Tryby działania i narzędzia:**
   - `scan` – Szybkie skanowanie biblioteki z paskiem postępu, kontrolą współbieżności i tabelą podsumowania.
   - `daemon` – Usługa w tle z harmonogramem skanowania (np. co godzinę).
   - `watch` – Monitorowanie zmian w systemie plików w czasie rzeczywistym (`watchdog`).
+  - `cache` – Podgląd statystyk cache'u (`--stats`), czyszczenie przestarzałych wpisów (`--prune`) lub reset bazy negatywnej (`--clear`).
   - `test-track` – Błyskawiczne sprawdzenie wyników u wszystkich dostawców dla jednego utworu z poziomu konsoli.
   - `audit` (lub `stats`) – Audyt offline raportujący stan biblioteki z eksportem do JSON/CSV.
   - `upgrade` – Pobieranie tekstów word-sync tylko dla utworów, które ich nie posiadają (pomija `.ttml`).
   - `prune` – Usuwanie osieroconych plików tekstów i przestarzałych duplikatów o niższej jakości.
-  - `web` (lub `dashboard`) – Minimalistyczny panel Web UI z odtwarzaczem karaoke (renderer ToxiPlays TTML).
+  - `web` (lub `dashboard`) – Minimalistyczny panel Web UI z odtwarzaczem karaoke (renderer ToxiPlays TTML), przełącznikami dostawców i zarządzaniem cache.
   - `trigger-scan` – Wywołanie skanowania biblioteki na serwerze Navidrome.
   - `ping-navidrome` – Sprawdzenie połączenia z API Navidrome.
 
@@ -91,6 +98,8 @@ services:
       dockerfile: Dockerfile
     container_name: navidrome-lyrics-aggregator
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       - MUSIC_DIR=/music
       - NLA_SCAN_INTERVAL=1h
@@ -103,6 +112,7 @@ services:
       - NLA_NAVIDROME_AUTO_SCAN=true
     volumes:
       - ./music:/music:rw
+      - ./data:/data:rw
       - ./config.yaml:/config/config.yaml:ro
     command: ["daemon", "--with-watch"]
     depends_on:
@@ -165,6 +175,11 @@ python -m src.main trigger-scan
 
 # 12. Uruchomienie minimalistycznego panelu Web UI i odtwarzacza karaoke
 python -m src.main web -p 8080 -d /ścieżka/do/muzyki
+
+# 13. Zarządzanie trwałym negatywnym cache'em SQLite
+python -m src.main cache --stats
+python -m src.main cache --prune
+python -m src.main cache --clear
 ```
 
 ---
@@ -172,6 +187,9 @@ python -m src.main web -p 8080 -d /ścieżka/do/muzyki
 ## ⚡ Maksymalizacja prędkości skanowania
 
 Aby przeskanować dużą bibliotekę muzyczną w najkrótszym czasie:
+- **Trwały negatywny cache (włączony domyślnie):** Utwory, dla których żaden dostawca nie znalazł tekstu, trafiają do bazy `data/cache.db` z czasem TTL (domyślnie 14 dni). Kolejne skanowania trwają sekundy zamiast minut, ponieważ brakujące utwory nie są ponownie odpytywane w sieci. Aby wymusić ponowne odpytanie, użyj `--no-cache`.
+- **Tryb szybkiej synchronizacji (`--fast-line-sync`):** Zatrzymuje przeszukiwanie kaskady natychmiast po znalezieniu tekstu zsynchronizowanego liniowo (LRC), pomijając pozostałe zapytania word-sync.
+- **Budżet zapytań word-sync (`--word-sync-budget N`):** Ogranicza zapytania o teksty sylabowe/słowne do $N$ pierwszych dostawców przed zatwierdzeniem LRC (np. `--word-sync-budget 3`).
 - **Zwiększ współbieżność (`--concurrency`):** Ustaw `--concurrency 16` lub `24`, aby asynchronicznie przetwarzać wiele utworów naraz.
 - **Pomiń utwory posiadające już jakikolwiek tekst (`NLA_UPGRADE_QUALITY=false`):** Domyślnie agregator odpytuje serwery w poszukiwaniu TTML, nawet jeśli istnieje `.lrc`. Wyłączenie tej opcji sprawi, że utwory z tekstem zostaną pominięte w ułamku milisekundy:
   ```bash
@@ -206,6 +224,12 @@ dry_run: false
 allow_plain_lyrics: false
 concurrency: 16
 
+# Ustawienia trwałego cache'u negatywnego
+cache:
+  enabled: true
+  db_path: "data/cache.db"
+  negative_ttl_days: 14
+
 # Połączenie z serwerem Navidrome
 navidrome:
   url: "http://localhost:4533"
@@ -237,6 +261,9 @@ Wszystkie opcje można również przekazać za pomocą zmiennych środowiskowych
 - `NLA_STORAGE_MODE` – Tryb zapisu: `sidecar`, `embedded` lub `both`
 - `NLA_EMBED_WORD_SYNC` – Osadzanie synchronizacji słownej (Enhanced LRC) w tagach audio (`true`/`false`)
 - `NLA_OUTPUT_DIR` – Dedykowany folder na pliki tekstów
+- `NLA_CACHE_ENABLED` – Włączenie trwałego cache'u SQLite (`true`/`false`)
+- `NLA_CACHE_DB_PATH` – Ścieżka do pliku bazy SQLite (`data/cache.db`)
+- `NLA_CACHE_NEGATIVE_TTL_DAYS` – Dni przechowywania nieudanych wyszukiwań (domyślnie: `14`)
 - `SPICY_LYRICS_SECRET_KEY` lub `NLA_SPICY_LYRICS_API_KEY` – Klucz API Spicy Lyrics (`sl_sk_...`)
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` – Opcjonalne poświadczenia Spotify API do automatycznego mapowania utworów
 - `NLA_SCAN_INTERVAL` – Częstotliwość skanowania w trybie demona (`1h`, `30m`, `3600s`)
@@ -285,7 +312,7 @@ Uruchomienie pełnego pakietu testów:
 ```bash
 pytest
 ```
-*99 testów jednostkowych (100% testów zdanych).*
+*137 testów jednostkowych (100% testów zdanych).*
 
 ---
 

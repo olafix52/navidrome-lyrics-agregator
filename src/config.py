@@ -54,6 +54,13 @@ class NavidromeConfig(BaseModel):
     full_scan: bool = Field(default=False, description="Trigger full library scan in Navidrome instead of fast scan")
 
 
+class CacheConfig(BaseModel):
+    """Configuration for SQLite persistent lyrics cache."""
+    enabled: bool = Field(default=True, description="Enable persistent caching for unfound lyrics lookups")
+    db_path: Path = Field(default=Path("data/lyrics_cache.db"), description="Path to SQLite cache database")
+    negative_ttl_days: float = Field(default=14.0, description="Days to remember tracks with no lyrics found")
+
+
 class AppConfig(BaseModel):
     """Main application configuration."""
 
@@ -85,6 +92,14 @@ class AppConfig(BaseModel):
     word_sync_search_budget: Optional[int] = Field(
         default=None,
         description="Maximum additional word-sync providers to query after a verified line-sync match is found (None for unlimited)",
+    )
+    cache: CacheConfig = Field(
+        default_factory=CacheConfig,
+        description="Persistent caching settings for negative lookups",
+    )
+    ignore_cache: bool = Field(
+        default=False,
+        description="Bypass cache lookups and force fresh provider queries",
     )
 
     # Navidrome server integration
@@ -180,6 +195,8 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
         "OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
+        "NLA_IGNORE_CACHE": ("ignore_cache", lambda v: v.lower() in ("true", "1", "yes")),
+        "IGNORE_CACHE": ("ignore_cache", lambda v: v.lower() in ("true", "1", "yes")),
     }
 
     for env_var, target in env_mapping.items():
@@ -193,6 +210,27 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
                     pass
             else:
                 data[target] = val
+
+    # Cache env settings
+    cache_data = data.setdefault("cache", {})
+    if not isinstance(cache_data, dict):
+        cache_data = {}
+        data["cache"] = cache_data
+
+    cache_enabled = os.environ.get("NLA_CACHE_ENABLED") or os.environ.get("CACHE_ENABLED")
+    if cache_enabled:
+        cache_data["enabled"] = cache_enabled.lower() in ("true", "1", "yes")
+
+    cache_path = os.environ.get("NLA_CACHE_DB_PATH") or os.environ.get("CACHE_DB_PATH")
+    if cache_path:
+        cache_data["db_path"] = Path(cache_path)
+
+    cache_ttl = os.environ.get("NLA_CACHE_NEGATIVE_TTL_DAYS") or os.environ.get("CACHE_NEGATIVE_TTL_DAYS")
+    if cache_ttl:
+        try:
+            cache_data["negative_ttl_days"] = float(cache_ttl)
+        except ValueError:
+            pass
 
     # Navidrome env settings
     navidrome_data = data.setdefault("navidrome", {})

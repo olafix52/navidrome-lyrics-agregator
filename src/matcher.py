@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from src.cache import LyricsCache
 from src.config import AppConfig
 from src.models import (
     LyricsSyncType,
@@ -21,15 +22,26 @@ logger = logging.getLogger("nla.matcher")
 class LyricsMatcher:
     """Orchestrates lyrics retrieval across multiple providers in cascade order."""
 
-    def __init__(self, config: AppConfig, providers: List[BaseLyricsProvider]):
+    def __init__(
+        self,
+        config: AppConfig,
+        providers: List[BaseLyricsProvider],
+        cache: Optional[LyricsCache] = None,
+    ):
         self.config = config
         self.providers = providers
+        self.cache = cache
+        if self.cache is None and getattr(config, "cache", None) and config.cache.enabled:
+            self.cache = LyricsCache(
+                db_path=config.cache.db_path,
+                ttl_days=config.cache.negative_ttl_days,
+            )
         self._search_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         self._cache_ttl = 600.0  # 10 minutes cache TTL
 
     async def process_track(self, track: TrackMetadata) -> ProcessResult:
         """Process a single audio track: check existing sidecar, query providers, verify, and save."""
-        # 1. Check if track should be skipped
+        # 1. Check if track should be skipped based on existing files / tags
         skip, skip_reason = should_skip_track(
             track.file_path,
             overwrite=self.config.overwrite,
@@ -45,12 +57,28 @@ class LyricsMatcher:
                 error_message=skip_reason,
             )
 
+        # 2. Check persistent negative cache (skip previously unfound tracks without network calls)
+        ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
+        if self.cache and not ignore_cache:
+            hit = await self.cache.is_negative_hit(track)
+            if hit:
+                logger.debug(
+                    f"[CACHE HIT - NEGATIVE] {track.display_name()} - skipped (no lyrics found on previous scan, "
+                    f"TTL remaining: {hit.remaining_days:.1f}d, fail count: {hit.failure_count})"
+                )
+                return ProcessResult(
+                    file_path=track.file_path,
+                    status=MatchStatus.SKIPPED,
+                    error_message=f"Negative cache: no lyrics found across providers ({hit.remaining_days:.1f}d remaining)",
+                )
+
         logger.info(f"[SEARCHING] {track.display_name()} ({track.duration:.1f}s)")
 
-        # 2. Iterate through provider cascade with quality priority (WORD_SYNC > LINE_SYNC > UNSYNCED)
+        # 3. Iterate through provider cascade with quality priority (WORD_SYNC > LINE_SYNC > UNSYNCED)
         best_match = None  # Tuple[LyricsResult, BaseLyricsProvider, float]
         remaining_word_sync_budget = getattr(self.config, "word_sync_search_budget", None)
         early_exit = getattr(self.config, "early_exit_on_line_sync", False)
+        providers_queried: List[str] = []
 
         for provider in self.providers:
             # Skip plain-only providers if allow_plain_lyrics is False
@@ -77,6 +105,7 @@ class LyricsMatcher:
                         break
                     remaining_word_sync_budget -= 1
 
+            providers_queried.append(provider.name)
             try:
                 logger.debug(f"[{provider.name}] Querying for '{track.display_name()}'...")
                 lyrics = await provider.get_lyrics(track)
@@ -128,7 +157,14 @@ class LyricsMatcher:
 
         if best_match:
             lyrics, provider, score = best_match
-            target_path, was_embedded = save_lyrics_for_track(
+
+            # Remove from negative cache if previously cached
+            if self.cache:
+                await self.cache.remove(track)
+
+            # Offload blocking sidecar and audio tag file writes to worker thread
+            target_path, was_embedded = await asyncio.to_thread(
+                save_lyrics_for_track,
                 audio_path=track.file_path,
                 lyrics=lyrics,
                 storage_mode=getattr(self.config, "storage_mode", "sidecar"),
@@ -158,6 +194,10 @@ class LyricsMatcher:
                 embedded=was_embedded,
                 match_score=score,
             )
+
+        # Record in negative cache so subsequent scans skip this track immediately
+        if self.cache and not ignore_cache:
+            await self.cache.record_negative(track, providers_checked=providers_queried)
 
         logger.info(f"[NOT FOUND] No matching lyrics found for {track.display_name()}")
         return ProcessResult(

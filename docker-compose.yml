@@ -26,6 +26,8 @@ services:
       dockerfile: Dockerfile
     container_name: navidrome-lyrics-aggregator
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       - MUSIC_DIR=/music
       - NLA_SCAN_INTERVAL=1h
@@ -35,6 +37,8 @@ services:
       # Read-write mount required to save companion .ttml, .yaml, and .lrc files
       - ./music:/music:rw
       - ./config.yaml:/config/config.yaml:ro
+      - ./data:/data:rw
     command: ["daemon", "--with-watch"]
     depends_on:
       - navidrome
+

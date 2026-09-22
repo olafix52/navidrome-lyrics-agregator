@@ -232,7 +232,7 @@ class LibraryScanner:
 
     async def _process_single_file(self, file_path: Path) -> ProcessResult:
         """Read metadata and invoke lyrics matcher on a single file."""
-        metadata = read_track_metadata(file_path)
+        metadata = await asyncio.to_thread(read_track_metadata, file_path)
         if not metadata:
             return ProcessResult(
                 file_path=file_path,

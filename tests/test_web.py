@@ -499,4 +499,30 @@ async def test_api_get_and_update_providers(tmp_path: Path):
         assert data2["providers"][2]["enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_api_cache_endpoints(tmp_path: Path):
+    """Verify GET /api/cache and POST /api/cache/clear endpoints."""
+    music_dir = tmp_path / "music"
+    music_dir.mkdir()
+
+    config = AppConfig(music_dir=music_dir)
+    app = create_app(config)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # GET /api/cache
+        res = await client.get("/api/cache")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["enabled"] is True
+        assert "total_negative_entries" in data
+
+        # POST /api/cache/clear
+        clear_res = await client.post("/api/cache/clear")
+        assert clear_res.status_code == 200
+        clear_data = clear_res.json()
+        assert clear_data["enabled"] is True
+        assert "deleted" in clear_data
+
+
+
 

@@ -54,15 +54,22 @@
   - Song duration deviation guard (default tolerance: $\pm 2.5$ seconds).
   - Fuzzy string similarity validation ($\ge 0.75$ threshold).
 
+- **High-Throughput Persistent Cache & Performance:**
+  - **SQLite Negative Cache (WAL mode):** Remembers tracks with missing lyrics and provider failures with exponential backoff and configurable TTL (`negative_ttl_days: 14`). Consecutive daemon runs skip unmatchable songs instantly in sub-milliseconds without hammering remote APIs.
+  - **Non-blocking Asynchronous I/O:** CPU/disk-bound mutagen audio tag extraction, lyrics writing, and SQLite transactions are offloaded to background threads via `asyncio.to_thread` to maintain a responsive event loop.
+  - **Cascade Budget & Fast Sync:** `--fast-line-sync` flag accepts line-synced LRC immediately without querying remaining providers; `--word-sync-budget` limits how many word-sync providers are queried before falling back.
+  - **Jemalloc memory allocator:** Docker image uses `libjemalloc2` for lower memory fragmentation during large-scale library scanning.
+
 - **Operating Modes & Library Management Tools:**
   - `scan` – High-speed library scan with Rich progress bar, concurrency control, and tabular summary.
   - `daemon` – Continuous background service with scheduled scans (e.g. every hour).
   - `watch` – Real-time filesystem events monitor powered by `watchdog` with debouncing.
+  - `cache` – Inspect cache statistics (`--stats`), prune expired entries (`--prune`), or clear the negative cache (`--clear`).
   - `test-track` – Rapid CLI provider query testing for a single artist and title without writing files.
   - `audit` (or `stats`) – Offline library audit reporting coverage (word-sync, line-sync, unsynced, missing) with JSON/CSV export.
   - `upgrade` – Targeted scan querying providers only for tracks lacking word-sync lyrics, automatically skipping `.ttml`.
   - `prune` – Safe housekeeping tool detecting and removing orphaned lyrics or obsolete lower-quality duplicates.
-  - `web` (or `dashboard`) – Minimalist Web UI dashboard with live karaoke music player (ToxiPlays TTML renderer) and manual search.
+  - `web` (or `dashboard`) – Minimalist Web UI dashboard with live karaoke music player (ToxiPlays TTML renderer), provider toggles, and cache management.
   - `trigger-scan` – Trigger a library rescan on Navidrome server on demand.
   - `ping-navidrome` – Test connectivity and Subsonic authentication with Navidrome.
 
@@ -91,6 +98,8 @@ services:
       dockerfile: Dockerfile
     container_name: navidrome-lyrics-aggregator
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     environment:
       - MUSIC_DIR=/music
       - NLA_SCAN_INTERVAL=1h
@@ -103,6 +112,7 @@ services:
       - NLA_NAVIDROME_AUTO_SCAN=true
     volumes:
       - ./music:/music:rw
+      - ./data:/data:rw
       - ./config.yaml:/config/config.yaml:ro
     command: ["daemon", "--with-watch"]
     depends_on:
@@ -165,6 +175,11 @@ python -m src.main trigger-scan
 
 # 12. Launch lightweight Web UI & live karaoke player
 python -m src.main web -p 8080 -d /path/to/music
+
+# 13. Persistent negative cache management
+python -m src.main cache --stats
+python -m src.main cache --prune
+python -m src.main cache --clear
 ```
 
 ---
@@ -172,6 +187,9 @@ python -m src.main web -p 8080 -d /path/to/music
 ## ⚡ Speed & Performance Tuning
 
 To scan large music collections at maximum speed:
+- **Persistent Negative Cache (Enabled by default):** Tracks with no lyrics found across all providers are cached with exponential backoff and a configurable TTL (`14` days by default). Subsequent daemon or manual scans finish in seconds because failed searches are not repeated. To bypass the cache, pass `--no-cache`.
+- **Fast Line-Sync Mode (`--fast-line-sync`):** Stops the provider cascade immediately once line-synced LRC is found, skipping remaining word-sync queries.
+- **Word-Sync Provider Budget (`--word-sync-budget N`):** Limits how many word-sync providers are queried before accepting line-sync lyrics (e.g. `--word-sync-budget 3`).
 - **Increase concurrency (`--concurrency`):** Set `--concurrency 16` or `32` to process tracks in parallel.
 - **Skip tracks with existing lyrics (`NLA_UPGRADE_QUALITY=false`):** By default, the aggregator searches for word-sync TTML even if an `.lrc` exists. Disable `upgrade_quality` to only fetch lyrics for completely missing songs:
   ```bash
@@ -206,6 +224,12 @@ dry_run: false
 allow_plain_lyrics: false
 concurrency: 16
 
+# Persistent negative cache settings
+cache:
+  enabled: true
+  db_path: "data/cache.db"
+  negative_ttl_days: 14
+
 # Navidrome server connection
 navidrome:
   url: "http://localhost:4533"
@@ -237,6 +261,9 @@ All parameters can also be configured using environment variables with the `NLA_
 - `NLA_STORAGE_MODE` – Storage destination: `sidecar`, `embedded`, or `both`
 - `NLA_EMBED_WORD_SYNC` – Embed word-level timing (Enhanced LRC) into audio tags (`true`/`false`)
 - `NLA_OUTPUT_DIR` – Custom directory for sidecar files
+- `NLA_CACHE_ENABLED` – Enable persistent SQLite cache (`true`/`false`)
+- `NLA_CACHE_DB_PATH` – Path to SQLite cache database (`data/cache.db`)
+- `NLA_CACHE_NEGATIVE_TTL_DAYS` – Days to cache missing track lookups (default: `14`)
 - `SPICY_LYRICS_SECRET_KEY` or `NLA_SPICY_LYRICS_API_KEY` – Spicy Lyrics API key (`sl_sk_...`)
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` – Optional Spotify API credentials for auto track ID resolution
 - `NLA_SCAN_INTERVAL` – Daemon scan interval (e.g. `1h`, `30m`, `3600s`)
@@ -285,7 +312,7 @@ Run the complete test suite covering TTML/YAML/LRC parsers, audio tag reading/wr
 ```bash
 pytest
 ```
-*99 unit tests passing (100% test coverage for all core components).*
+*137 unit tests passing (100% test coverage for all core components).*
 
 ---
 
