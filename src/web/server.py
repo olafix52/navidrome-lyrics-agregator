@@ -131,7 +131,7 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
             rel_path = str(p.relative_to(music_dir))
             track_id = encode_track_id(p, music_dir)
 
-            existing = get_existing_lyrics_file(p)
+            existing = get_existing_lyrics_file(p, output_dir=config.output_dir)
             has_lyrics = existing is not None
             fmt_str = existing[1].value if existing else None
 
@@ -233,7 +233,7 @@ def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> Fa
             raise HTTPException(status_code=404, detail="Audio file not found")
 
         meta = read_track_metadata(audio_path)
-        existing = get_existing_lyrics_file(audio_path)
+        existing = get_existing_lyrics_file(audio_path, output_dir=config.output_dir)
 
         if not existing:
             return {

@@ -78,7 +78,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
             logger.debug(f"[spicylyrics] Could not determine Spotify track ID for '{track.display_name()}'.")
             return None
 
-        if not re.fullmatch(r"^[A-Za-z0-9]{22}$", track_id):
+        if not re.fullmatch(r"[A-Za-z0-9]{22}", track_id):
             logger.warning(f"[spicylyrics] Invalid Spotify track ID format: '{track_id}'")
             return None
 
@@ -253,6 +253,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
                 duration=float(duration) if duration is not None else None,
                 title=track.title,
                 artist=track.artist,
+                match_score=getattr(track, '_match_score', 1.0),
                 metadata={
                     "provider": "Spicy Lyrics",
                     "source": source,
@@ -274,8 +275,9 @@ class SpicyLyricsProvider(BaseLyricsProvider):
                     continue
                 text = item.get("Text", "").strip()
                 start_s = float(item.get("StartTime", 0.0))
-                m = int(start_s // 60)
-                s = start_s % 60
+                total_ms = int(round(start_s * 1000))
+                m, rem = divmod(total_ms, 60000)
+                s = rem / 1000.0
                 lrc_lines.append(f"[{m:02d}:{s:05.2f}]{text}")
 
             if not lrc_lines:
@@ -307,6 +309,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
                 duration=float(duration) if duration is not None else None,
                 title=track.title,
                 artist=track.artist,
+                match_score=getattr(track, '_match_score', 1.0),
                 metadata={
                     "provider": "Spicy Lyrics",
                     "source": source,
@@ -341,6 +344,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
                 provider_name=self.name,
                 title=track.title,
                 artist=track.artist,
+                match_score=getattr(track, '_match_score', 1.0),
                 metadata={
                     "source": source,
                     "spotify_id": track_id,

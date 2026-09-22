@@ -13,7 +13,7 @@ from src.models import (
 )
 from src.normalizer import verify_track_match
 from src.providers.base import BaseLyricsProvider
-from src.storage import save_lyrics_for_track, save_lyrics_sidecar, should_skip_track
+from src.storage import save_lyrics_for_track, should_skip_track
 
 logger = logging.getLogger("nla.matcher")
 
@@ -200,11 +200,16 @@ class LyricsMatcher:
 
         # Execute concurrently and stream as each completes
         tasks = [asyncio.create_task(_query(p)) for p in self.providers]
-        for fut in asyncio.as_completed(tasks):
-            res = await fut
-            if res is not None:
-                collected.append(res)
-                yield res
+        try:
+            for fut in asyncio.as_completed(tasks):
+                res = await fut
+                if res is not None:
+                    collected.append(res)
+                    yield res
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
 
         # Cache results if any found
         if collected:

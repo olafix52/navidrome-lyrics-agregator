@@ -126,8 +126,8 @@ providers:
     enabled: true
     rate_limit_per_second: 2.0
     timeout_seconds: 10.0
-    # Czysty token wyodrębniony z web-desktop-app-v1.0 (zamiast całego JSON-a URL-encoded)
-    api_key: "26075c17027a76768863f86324c6472f81104166b02b1b4abd29"
+    # Musixmatch user token (set in config.local.yaml or MUSIXMATCH_USER_TOKEN env var)
+    # api_key: "YOUR_MUSIXMATCH_USER_TOKEN"
 
   qqmusic:
     enabled: true
@@ -168,6 +168,6 @@ providers:
 # ==============================================================================
 navidrome:
   url: "http://localhost:4533"
-  user: "admin"
-  password: "admin_password"
+  # user: "your_navidrome_user"
+  # password: "your_navidrome_password"
   auto_scan: false

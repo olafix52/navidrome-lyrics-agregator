@@ -17,6 +17,12 @@ duration_tolerance_seconds: 2.5
 # Minimum similarity score (0.0 to 1.0) required to accept lyrics
 min_similarity_score: 0.75
 
+# Lyrics storage destination: 'sidecar' (companion files), 'embedded' (audio tags), or 'both'
+storage_mode: "sidecar"
+
+# Embed word/syllable-level timing (Enhanced LRC <mm:ss.xx>) into audio tags for karaoke players (Feishin, Symfonium)
+embed_word_sync: true
+
 # Force re-scanning and overwriting existing lyrics files (.ttml, .yaml, .lrc)
 overwrite: false
 
@@ -155,3 +161,12 @@ providers:
     rate_limit_per_second: 1.5
     timeout_seconds: 10.0
     # api_key: "YOUR_GENIUS_API_CLIENT_ACCESS_TOKEN"
+
+# ==============================================================================
+# Navidrome Subsonic Integration & Scan Trigger
+# ==============================================================================
+navidrome:
+  url: "http://localhost:4533"
+  # user: "your_navidrome_user"
+  # password: "your_navidrome_password"
+  auto_scan: false

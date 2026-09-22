@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel
 
-from src.models import LyricsFormat, LyricsSyncType, detect_sync_type
+from src.models import LyricsFormat
 
 
 class KaraokeWord(BaseModel):
@@ -357,7 +357,6 @@ def format_seconds_to_ttml_time(seconds: Optional[float]) -> str:
 
 def karaoke_to_ttml(lines: List[KaraokeLine], title: str = "", artist: str = "") -> str:
     """Convert a list of KaraokeLine objects into a standard TTML XML document compatible with Apple Music / ToxiPlays."""
-    import html
 
     title_escaped = html.escape(title or "Unknown Track")
     artist_escaped = html.escape(artist or "")

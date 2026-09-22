@@ -2,11 +2,9 @@
 
 from pathlib import Path
 from unittest.mock import MagicMock
-import pytest
 
 from src.config import AppConfig, save_enabled_providers
 from src.main import build_parser, run_providers_command
-from src.providers import AVAILABLE_PROVIDERS
 
 
 def test_build_parser_provider_flags():

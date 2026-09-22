@@ -1393,3 +1393,70 @@ async def test_spicylyrics_provider_anonymous_title_artist_resolution(sample_tra
         assert result.metadata["spotify_id"] == "22AyfOBziPxrg9sHz0L6Yw"
 
 
+def test_providers_module_annotations():
+    """Verify that src.providers annotations can be evaluated without NameError."""
+    import src.providers as p
+    import typing
+    hints = typing.get_type_hints(p)
+    assert "PROVIDER_METADATA" in hints
+
+
+@pytest.mark.asyncio
+async def test_base_provider_retry_after_http_date():
+    """Verify that BaseLyricsProvider.request_with_retry does not crash on RFC HTTP-date Retry-After."""
+    from src.providers.base import BaseLyricsProvider
+
+    class DummyProvider(BaseLyricsProvider):
+        name = "dummy"
+        async def get_lyrics(self, track):
+            return None
+
+    prov = DummyProvider(config=ProviderConfig(timeout_seconds=5.0), max_retries=2)
+    mock_resp_429 = MagicMock()
+    mock_resp_429.status_code = 429
+    mock_resp_429.headers = {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}
+
+    mock_resp_200 = MagicMock()
+    mock_resp_200.status_code = 200
+    mock_resp_200.raise_for_status.return_value = None
+
+    mock_client = MagicMock()
+    mock_client.request = AsyncMock(side_effect=[mock_resp_429, mock_resp_200])
+
+    with patch.object(prov, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        resp = await prov.request_with_retry("GET", "https://example.com/api")
+        assert resp == mock_resp_200
+        mock_sleep.assert_called_once_with(2.0)
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_timestamp_minute_boundary(sample_track):
+    """Verify that SpicyLyrics Line format near minute boundary does not produce [00:60.00]."""
+    sample_track.spotify_id = "4cOdK2wGLETKBW3PvgPWqT"
+    sample_track._match_score = 0.88
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "EndTime": 120.0,
+            "Content": [
+                {"Text": "Boundary line", "StartTime": 59.9997, "EndTime": 62.0},
+            ],
+        },
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_resp):
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert ":60" not in result.content
+        assert "[01:00.00]Boundary line" in result.content
+        assert result.match_score == 0.88
+
+
+

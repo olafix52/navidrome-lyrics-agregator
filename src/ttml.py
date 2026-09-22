@@ -1,3 +1,4 @@
+import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
@@ -159,7 +160,6 @@ def build_ttml(
 
     has_v2 = any("v2" in line.get("agent", "") for line in lines)
     if has_v2:
-        import re
         artist_parts = [
             a.strip()
             for a in re.split(r"\s+(?:feat\.?|ft\.?|&|,|/|with)\s+", artist, flags=re.IGNORECASE)

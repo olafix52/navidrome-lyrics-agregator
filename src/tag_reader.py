@@ -5,12 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, List, Optional
 import mutagen
-from mutagen.flac import FLAC
-from mutagen.id3 import ID3
-from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
-from mutagen.oggopus import OggOpus
-from mutagen.oggvorbis import OggVorbis
 
 from src.models import TrackMetadata
 from src.normalizer import clean_artist, clean_title

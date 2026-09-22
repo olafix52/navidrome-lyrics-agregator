@@ -1,6 +1,6 @@
 """Providers package and registry for lyrics providers."""
 
-from typing import Dict, List, Type
+from typing import Any, Dict, List, Type
 from src.config import AppConfig
 from src.providers.amll import AMLLProvider
 from src.providers.apple_music import AppleMusicProvider

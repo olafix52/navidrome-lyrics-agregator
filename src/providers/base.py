@@ -80,7 +80,11 @@ class BaseLyricsProvider(ABC):
 
                 # If rate limited by remote server (429), wait and retry
                 if response.status_code == 429:
-                    retry_after = float(response.headers.get("Retry-After", 2.0 * attempt))
+                    raw_retry = response.headers.get("Retry-After", "")
+                    try:
+                        retry_after = float(raw_retry)
+                    except (ValueError, TypeError):
+                        retry_after = 2.0 * attempt
                     logger.warning(f"[{self.name}] Rate limited (429), waiting {retry_after}s...")
                     await asyncio.sleep(retry_after)
                     continue
