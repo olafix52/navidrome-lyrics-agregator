@@ -95,13 +95,29 @@ def parse_ttml_to_karaoke(ttml_content: str) -> List[KaraokeLine]:
             end_s = parse_time_str_to_seconds(_get_element_attr(p, "end"))
             agent = _get_element_attr(p, "agent") or "v1"
 
-            raw_line_text = "".join(html.unescape(t) for t in p.itertext())
+            # Gather line text excluding auxiliary roles (translation, romanization)
+            text_pieces = []
+            if p.text:
+                text_pieces.append(p.text)
+            for child in p:
+                c_tag = child.tag.split("}")[-1].lower()
+                c_role = _get_element_attr(child, "role")
+                if c_tag == "span" and c_role in ("x-translation", "x-roman"):
+                    if child.tail:
+                        text_pieces.append(child.tail)
+                    continue
+                text_pieces.append("".join(child.itertext()))
+                if child.tail:
+                    text_pieces.append(child.tail)
+
+            raw_line_text = "".join(html.unescape(t) for t in text_pieces)
             line_text = re.sub(r'\s+', ' ', raw_line_text).strip()
 
             words: List[KaraokeWord] = []
             timed_spans = [
                 s for s in p.iter()
                 if s.tag.split("}")[-1].lower() == "span"
+                and _get_element_attr(s, "role") not in ("x-translation", "x-roman")
                 and _get_element_attr(s, "begin")
                 and not any(child.tag.split("}")[-1].lower() == "span" for child in s)
             ]

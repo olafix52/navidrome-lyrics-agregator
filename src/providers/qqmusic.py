@@ -394,14 +394,31 @@ class QQMusicProvider(BaseLyricsProvider):
 
         try:
             data = resp.json()
+            # Handle Tencent search censor keyword blocking (subcode: -10002 / "query forbid")
+            if data.get("subcode") == -10002 or data.get("message") == "query forbid":
+                logger.debug(f"[{self.name}] Query forbidden by Tencent filter ({query}), attempting fallback queries...")
+                words = [w for w in re.findall(r"\w+", title) if len(w) > 2]
+                for w in sorted(words, key=len, reverse=True):
+                    fb_query = f"{artist} {w}".strip()
+                    if fb_query.lower() == query.lower():
+                        continue
+                    fb_resp = await self.request_with_retry("GET", search_url, params={"w": fb_query, "format": "json", "p": 1, "n": 5}, headers=headers)
+                    if fb_resp:
+                        try:
+                            fb_data = fb_resp.json()
+                            if fb_data.get("subcode") != -10002 and fb_data.get("data", {}).get("song", {}).get("list"):
+                                data = fb_data
+                                logger.debug(f"[{self.name}] Succeeded with fallback query: {fb_query}")
+                                break
+                        except Exception:
+                            pass
+
             song_list = data.get("data", {}).get("song", {}).get("list", [])
             if not song_list:
                 logger.debug(f"[{self.name}] No songs found for query: {query}")
                 return None
 
-            best_song: Optional[Dict[str, Any]] = None
-            best_score = 0.0
-
+            candidates: List[tuple[float, Dict[str, Any]]] = []
             for song in song_list:
                 interval = safe_float(song.get("interval"), 0.0) or 0.0
                 if track.duration > 0 and interval > 0:
@@ -419,149 +436,152 @@ class QQMusicProvider(BaseLyricsProvider):
                     candidate_artist=singer_names,
                 )
 
-                if score > best_score:
-                    best_score = score
-                    best_song = song
+                if score >= 0.6:
+                    candidates.append((score, song))
 
-            if not best_song or best_score < 0.6:
-                logger.debug(f"[{self.name}] Low candidate score ({best_score:.2f}) for: {query}")
+            if not candidates:
+                logger.debug(f"[{self.name}] Low candidate scores for: {query}")
                 return None
 
-            songmid = best_song.get("songmid")
-            if not songmid:
-                return None
+            candidates.sort(key=lambda x: x[0], reverse=True)
 
-            candidate_title = best_song.get("songname") or title
-            singers = best_song.get("singer", [])
-            candidate_artist = " / ".join(s.get("name", "") for s in singers if isinstance(s, dict)) or artist
+            for cand_score, cand_song in candidates[:3]:
+                songmid = cand_song.get("songmid")
+                if not songmid:
+                    continue
 
-            # 1. Attempt word-sync QRC via GetPlayLyricInfo
-            musicu_payload = {
-                "comm": {"ct": "19", "cv": "1873", "uin": "0"},
-                "req": {
-                    "module": "music.musichallSong.PlayLyricInfo",
-                    "method": "GetPlayLyricInfo",
-                    "param": {
-                        "songMID": songmid,
-                        "qrc": 1,
-                        "qrc_t": 0,
-                        "trans": 1,
-                        "roma": 1,
-                        "crypt": 1,
+                candidate_title = cand_song.get("songname") or title
+                singers = cand_song.get("singer", [])
+                candidate_artist = " / ".join(s.get("name", "") for s in singers if isinstance(s, dict)) or artist
+
+                # 1. Attempt word-sync QRC via GetPlayLyricInfo
+                musicu_payload = {
+                    "comm": {"ct": "19", "cv": "1873", "uin": "0"},
+                    "req": {
+                        "module": "music.musichallSong.PlayLyricInfo",
+                        "method": "GetPlayLyricInfo",
+                        "param": {
+                            "songMID": songmid,
+                            "qrc": 1,
+                            "qrc_t": 0,
+                            "trans": 1,
+                            "roma": 1,
+                            "crypt": 1,
+                        },
                     },
-                },
-            }
+                }
 
-            musicu_resp = await self.request_with_retry("POST", self.DEFAULT_MUSICU_URL, json=musicu_payload, headers=headers)
-            if musicu_resp and musicu_resp.status_code == 200:
-                try:
+                musicu_resp = await self.request_with_retry("POST", self.DEFAULT_MUSICU_URL, json=musicu_payload, headers=headers)
+                if musicu_resp and musicu_resp.status_code == 200:
                     try:
-                        m_data = musicu_resp.json()
-                    except (json.JSONDecodeError, ValueError):
-                        logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
-                        m_data = None
+                        try:
+                            m_data = musicu_resp.json()
+                        except (json.JSONDecodeError, ValueError):
+                            logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                            m_data = None
 
-                    if m_data:
-                        # Handle direct top-level lyric (legacy mock / response format)
-                        if "lyric" in m_data and "req" not in m_data:
-                            raw_lyric = m_data.get("lyric", "")
-                            if raw_lyric:
-                                sync_type = detect_sync_type(raw_lyric, LyricsFormat.LRC)
-                                return LyricsResult(
-                                    content=raw_lyric.strip(),
-                                    format=LyricsFormat.LRC,
-                                    sync_type=sync_type,
-                                    provider_name=self.name,
-                                    title=candidate_title,
-                                    artist=candidate_artist,
-                                    match_score=best_score,
-                                    metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
-                                )
-
-                        req_data = m_data.get("req", {}).get("data", {})
-                        qrc_hex = req_data.get("lyric", "")
-                        if qrc_hex and isinstance(qrc_hex, str):
-                            # If encrypted hex QRC
-                            if len(qrc_hex) > 64 and all(c in "0123456789abcdefABCDEF \r\n" for c in qrc_hex):
-                                qrc_xml = qrc_decrypt(qrc_hex)
-                                ttml_content = convert_qrc_to_ttml(qrc_xml, title=candidate_title, artist=candidate_artist)
-                                if ttml_content and "<tt" in ttml_content.lower():
+                        if m_data:
+                            # Handle direct top-level lyric (legacy mock / response format)
+                            if "lyric" in m_data and "req" not in m_data:
+                                raw_lyric = m_data.get("lyric", "")
+                                if raw_lyric:
+                                    sync_type = detect_sync_type(raw_lyric, LyricsFormat.LRC)
                                     return LyricsResult(
-                                        content=ttml_content.strip(),
-                                        format=LyricsFormat.TTML,
-                                        sync_type=LyricsSyncType.WORD_SYNC,
+                                        content=raw_lyric.strip(),
+                                        format=LyricsFormat.LRC,
+                                        sync_type=sync_type,
                                         provider_name=self.name,
                                         title=candidate_title,
                                         artist=candidate_artist,
-                                        match_score=best_score,
-                                        metadata={"songmid": songmid, "source_format": "qrc", "match_score": best_score},
+                                        match_score=cand_score,
+                                        metadata={"songmid": songmid, "source_format": "lrc", "match_score": cand_score},
                                     )
-                            elif qrc_hex.strip().startswith("["):
-                                sync_type = detect_sync_type(qrc_hex, LyricsFormat.LRC)
-                                return LyricsResult(
-                                    content=qrc_hex.strip(),
-                                    format=LyricsFormat.LRC,
-                                    sync_type=sync_type,
-                                    provider_name=self.name,
-                                    title=candidate_title,
-                                    artist=candidate_artist,
-                                    match_score=best_score,
-                                    metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
-                                )
-                except Exception as e:
-                    logger.debug(f"[{self.name}] Error decrypting/converting QRC for {songmid}: {e}")
 
-            # 2. Fallback to line-synced LRC via fcg_query_lyric_new.fcg
-            lyric_url = self.DEFAULT_LYRIC_URL
-            lyric_params = {
-                "songmid": songmid,
-                "format": "json",
-                "nobase64": 1,
-            }
+                            req_data = m_data.get("req", {}).get("data", {})
+                            qrc_hex = req_data.get("lyric", "")
+                            if qrc_hex and isinstance(qrc_hex, str):
+                                # If encrypted hex QRC
+                                if len(qrc_hex) > 64 and all(c in "0123456789abcdefABCDEF \r\n" for c in qrc_hex):
+                                    qrc_xml = qrc_decrypt(qrc_hex)
+                                    ttml_content = convert_qrc_to_ttml(qrc_xml, title=candidate_title, artist=candidate_artist)
+                                    if ttml_content and "<tt" in ttml_content.lower():
+                                        return LyricsResult(
+                                            content=ttml_content.strip(),
+                                            format=LyricsFormat.TTML,
+                                            sync_type=LyricsSyncType.WORD_SYNC,
+                                            provider_name=self.name,
+                                            title=candidate_title,
+                                            artist=candidate_artist,
+                                            match_score=cand_score,
+                                            metadata={"songmid": songmid, "source_format": "qrc", "match_score": cand_score},
+                                        )
+                                elif qrc_hex.strip().startswith("["):
+                                    sync_type = detect_sync_type(qrc_hex, LyricsFormat.LRC)
+                                    return LyricsResult(
+                                        content=qrc_hex.strip(),
+                                        format=LyricsFormat.LRC,
+                                        sync_type=sync_type,
+                                        provider_name=self.name,
+                                        title=candidate_title,
+                                        artist=candidate_artist,
+                                        match_score=cand_score,
+                                        metadata={"songmid": songmid, "source_format": "lrc", "match_score": cand_score},
+                                    )
+                    except Exception as e:
+                        logger.debug(f"[{self.name}] Error decrypting/converting QRC for {songmid}: {e}")
 
-            lyric_resp = await self.request_with_retry("GET", lyric_url, params=lyric_params, headers=headers)
-            if not lyric_resp or lyric_resp.status_code != 200:
-                return None
+                # 2. Fallback to line-synced LRC via fcg_query_lyric_new.fcg
+                lyric_url = self.DEFAULT_LYRIC_URL
+                lyric_params = {
+                    "songmid": songmid,
+                    "format": "json",
+                    "nobase64": 1,
+                }
 
-            try:
-                l_data = lyric_resp.json()
-            except (json.JSONDecodeError, ValueError):
-                logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
-                return None
+                lyric_resp = await self.request_with_retry("GET", lyric_url, params=lyric_params, headers=headers)
+                if not lyric_resp or lyric_resp.status_code != 200:
+                    continue
 
-            if l_data.get("retcode", -1) != 0 and l_data.get("code", -1) != 0:
-                return None
-
-            raw_lyric = l_data.get("lyric", "")
-            if not raw_lyric:
-                return None
-
-            # Handle base64 fallback if server sent encoded lyric
-            if not raw_lyric.strip().startswith("["):
                 try:
-                    decoded = base64.b64decode(raw_lyric).decode("utf-8", errors="ignore")
-                    if decoded.strip():
-                        raw_lyric = decoded
-                except Exception:
-                    pass
+                    l_data = lyric_resp.json()
+                except (json.JSONDecodeError, ValueError):
+                    logger.debug(f"[{self.name}] Invalid JSON response for candidate, skipping")
+                    continue
 
-            raw_lyric = raw_lyric.strip()
-            if not raw_lyric:
-                return None
+                if l_data.get("retcode", -1) != 0 and l_data.get("code", -1) != 0:
+                    continue
 
-            sync_type = detect_sync_type(raw_lyric, LyricsFormat.LRC)
+                raw_lyric = l_data.get("lyric", "")
+                if not raw_lyric:
+                    continue
 
-            return LyricsResult(
-                content=raw_lyric,
-                format=LyricsFormat.LRC,
-                sync_type=sync_type,
-                provider_name=self.name,
-                title=candidate_title,
-                artist=candidate_artist,
-                match_score=best_score,
-                metadata={"songmid": songmid, "source_format": "lrc", "match_score": best_score},
-            )
+                # Handle base64 fallback if server sent encoded lyric
+                if not raw_lyric.strip().startswith("["):
+                    try:
+                        decoded = base64.b64decode(raw_lyric).decode("utf-8", errors="ignore")
+                        if decoded.strip():
+                            raw_lyric = decoded
+                    except Exception:
+                        pass
 
+                raw_lyric = raw_lyric.strip()
+                if not raw_lyric:
+                    continue
+
+                sync_type = detect_sync_type(raw_lyric, LyricsFormat.LRC)
+
+                return LyricsResult(
+                    content=raw_lyric,
+                    format=LyricsFormat.LRC,
+                    sync_type=sync_type,
+                    provider_name=self.name,
+                    title=candidate_title,
+                    artist=candidate_artist,
+                    match_score=cand_score,
+                    metadata={"songmid": songmid, "source_format": "lrc", "match_score": cand_score},
+                )
+
+            return None
         except Exception as e:
             logger.debug(f"[{self.name}] Error processing lyrics: {e}")
             return None

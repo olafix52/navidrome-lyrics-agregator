@@ -6,6 +6,13 @@ from src.providers.amll import AMLLProvider
 from src.providers.apple_music import AppleMusicProvider
 from src.providers.base import BaseLyricsProvider
 from src.providers.binilyrics import BiniLyricsProvider
+from src.providers.blends import (
+    AppleKugouBlendProvider,
+    AppleNetEaseBlendProvider,
+    AppleNetEaseKugouBlendProvider,
+    AppleNetEaseQQBlendProvider,
+    AppleQQBlendProvider,
+)
 from src.providers.genius import GeniusProvider
 from src.providers.kugou import KugouProvider
 from src.providers.kuwo import KuwoProvider
@@ -33,6 +40,11 @@ AVAILABLE_PROVIDERS: Dict[str, Type[BaseLyricsProvider]] = {
     "kugou": KugouProvider,
     "lyricsify": LyricsifyProvider,
     "genius": GeniusProvider,
+    "blend": AppleQQBlendProvider,
+    "kublend": AppleKugouBlendProvider,
+    "neblend": AppleNetEaseBlendProvider,
+    "triblend": AppleNetEaseQQBlendProvider,
+    "kutriblend": AppleNetEaseKugouBlendProvider,
 }
 
 PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
@@ -134,6 +146,41 @@ PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
         "requires_api_key": False,
         "default_priority": 14,
     },
+    "blend": {
+        "name": "Apple+QQ Blend",
+        "description": "Apple Music lines with QQ Music word timing (mild-lyrics blend)",
+        "formats": ["TTML (Word-sync)"],
+        "requires_api_key": False,
+        "default_priority": 15,
+    },
+    "kublend": {
+        "name": "Apple+Kugou Blend",
+        "description": "Apple Music lines with Kugou word timing (mild-lyrics kublend)",
+        "formats": ["TTML (Word-sync)"],
+        "requires_api_key": False,
+        "default_priority": 16,
+    },
+    "neblend": {
+        "name": "Apple+NetEase Blend",
+        "description": "Apple Music lines with NetEase word timing (mild-lyrics neblend)",
+        "formats": ["TTML (Word-sync)"],
+        "requires_api_key": False,
+        "default_priority": 17,
+    },
+    "triblend": {
+        "name": "Apple+NetEase+QQ Blend",
+        "description": "Apple Music lines + NetEase timing + QQ Music filler (mild-lyrics triblend)",
+        "formats": ["TTML (Word-sync)"],
+        "requires_api_key": False,
+        "default_priority": 18,
+    },
+    "kutriblend": {
+        "name": "Apple+NetEase+Kugou Blend",
+        "description": "Apple Music lines + NetEase timing + Kugou filler (mild-lyrics kutriblend)",
+        "formats": ["TTML (Word-sync)"],
+        "requires_api_key": False,
+        "default_priority": 19,
+    },
 }
 
 
@@ -178,6 +225,11 @@ __all__ = [
     "KugouProvider",
     "LyricsifyProvider",
     "GeniusProvider",
+    "AppleQQBlendProvider",
+    "AppleKugouBlendProvider",
+    "AppleNetEaseBlendProvider",
+    "AppleNetEaseQQBlendProvider",
+    "AppleNetEaseKugouBlendProvider",
     "AVAILABLE_PROVIDERS",
     "PROVIDER_METADATA",
     "build_provider_cascade",

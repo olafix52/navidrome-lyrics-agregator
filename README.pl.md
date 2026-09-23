@@ -13,7 +13,7 @@
 
 ## 🌟 Kluczowe funkcje
 
-- **Kaskada priorytetów (Quality Cascade) – 14 dostawców:**
+- **Kaskada priorytetów (Quality Cascade) – 19 dostawców:**
   1. `spicylyrics` – Spicy Lyrics Developer API (word-sync `.ttml` na poziomie sylab oraz `.lrc`).
   2. `amll` – Apple Music-Like Lyrics DB (`.ttml` z sylabami i wieloma wokalistami).
   3. `apple_music` – Apple Music Catalog / AMLL (`.ttml`).
@@ -21,13 +21,24 @@
   5. `unison` – Społecznościowe API Better Lyrics Unison (`.ttml` / `.yaml` / `.lrc`).
   6. `binilyrics` – BiniLyrics / Aligned REST API (`.ttml` / `.lrc`).
   7. `lrclib` – LRCLIB Database (`.yaml` word-synced oraz `.lrc` line-synced).
-  8. `musixmatch` – Musixmatch Desktop API (RichSync word-sync `.ttml` oraz `.lrc`).
-  9. `qqmusic` – QQ Music / Tencent API (QRC word-sync `.ttml` oraz `.lrc`).
-  10. `kuwo` – Kuwo Music API (`.lrc`).
-  11. `netease` – NetEase Cloud Music 163 API (YRC word-sync `.ttml` oraz `.lrc`).
-  12. `kugou` – Kugou Music API (KRC word-sync `.ttml` oraz `.lrc`).
-  13. `lyricsify` – Baza Lyricsify (wsparcie FlareSolverr).
-  14. `genius` – Genius API + HTML Scraper (opcjonalny niesynchroniczny fallback).
+  8. `musixmatch` – Musixmatch iOS Mobile API (RichSync word-sync `.ttml` i `.lrc` z buforowaniem tokenów, wyszukiwaniem Spotify ID, ekstrakcją autorów oraz wygładzaniem przerw).
+  9. `neblend` – Wersy Apple Music + timing słów z NetEase (mild-lyrics neblend).
+  10. `triblend` – Wersy Apple Music + timing z NetEase + uzupełnianie braków z QQ Music (mild-lyrics triblend).
+  11. `kutriblend` – Wersy Apple Music + timing z NetEase + uzupełnianie braków z Kugou (mild-lyrics kutriblend).
+  12. `netease` – NetEase Cloud Music 163 API (YRC word-sync `.ttml` oraz `.lrc`).
+  13. `blend` – Wersy Apple Music + timing słów z QQ Music (mild-lyrics blend).
+  14. `qqmusic` – QQ Music / Tencent API (QRC word-sync `.ttml` oraz `.lrc`).
+  15. `kublend` – Wersy Apple Music + timing słów z Kugou (mild-lyrics kublend).
+  16. `kugou` – Kugou Music API (KRC word-sync `.ttml` oraz `.lrc`).
+  17. `kuwo` – Kuwo Music API (`.lrc`).
+  18. `lyricsify` – Baza Lyricsify (wsparcie FlareSolverr).
+  19. `genius` – Genius API + HTML Scraper (opcjonalny niesynchroniczny fallback).
+
+- **Silnik Blend z Mild-Lyrics (Fuzja wersów i synchronizacji słów):**
+  - **5 wyspecjalizowanych dostawców Blend:** Łączy oryginalny tekst i podział wersów z Apple Music / SpicyLyrics / LRCLIB z precyzyjnymi timingami słów/sylab od dawców z azjatyckich platform streamingowych (QQ Music QRC, NetEase YRC, Kugou KRC).
+  - **Inteligentne usuwanie cenzury i dopasowywanie slangu:** Automatycznie przywraca ocenzurowane słowa dawcy (np. `f***` -> `fucking`), dopasowuje skróty językowe (`it's`, `don't`), obsługuje odmiany slangowe (`nothin'` -> `nothing`) i scala rozbite tokeny wielosłowne.
+  - **Wypełnianie luk wieloma dawcami (`triblend`, `kutriblend`):** Wypełnia wersy brakujące u głównego dawcy timingami z dawcy rezerwowego.
+  - **Czystość wersów:** Automatycznie ignoruje zbędne metadane, spany tłumaczeń (`x-translation`) oraz transkrypcji fonetycznej (`x-roman`).
 
 - **Elastyczne przechowywanie i zapis w tagach audio (Embedded Lyrics):**
   - **Pliki sidecar:** Atomowy zapis plików towarzyszących (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) z hierarchią jakości (`.ttml` > `.yaml` > `.lrc`).
@@ -251,10 +262,15 @@ enabled_providers:
   - "binilyrics"
   - "lrclib"
   - "musixmatch"
-  - "qqmusic"
-  - "kuwo"
+  - "neblend"
+  - "triblend"
+  - "kutriblend"
   - "netease"
+  - "blend"
+  - "qqmusic"
+  - "kublend"
   - "kugou"
+  - "kuwo"
   - "lyricsify"
   - "genius"
 ```
@@ -301,7 +317,7 @@ Spicy Lyrics to dostawca o najwyższym priorytecie oferujący teksty TTML z prec
      ```
 
 > [!NOTE]
-> Agregator działa bez problemu nawet bez klucza Spicy Lyrics! W przypadku braku klucza usługa zostanie po prostu pominięta, a teksty zostaną pobrane z pozostałych 12 darmowych i otwartych dostawców (m.in. AMLL, RMM Revival, Unison, LRCLIB).
+> Agregator działa bez problemu nawet bez klucza Spicy Lyrics! W przypadku braku klucza usługa zostanie po prostu pominięta, a teksty zostaną pobrane z pozostałych darmowych i otwartych dostawców (m.in. AMLL, RMM Revival, Unison, LRCLIB, Blend).
 
 > [!TIP]
 > Jeśli posiadasz własne hasła, tokeny API lub niestandardowe ścieżki, umieść je w `config.local.yaml` lub `.env`. Pliki te są automatycznie ignorowane przez Git i nie trafią do repozytorium.
@@ -315,7 +331,7 @@ Uruchomienie pełnego pakietu testów:
 ```bash
 pytest
 ```
-*140 testów jednostkowych (100% testów zdanych).*
+*158 testów jednostkowych (100% testów zdanych).*
 
 ---
 

@@ -463,10 +463,10 @@ async def test_api_get_and_update_providers(tmp_path: Path):
         res = await client.get("/api/providers")
         assert res.status_code == 200
         data = res.json()
-        assert data["total"] == 14
+        assert data["total"] == 19
         assert data["enabled_count"] == 3
         providers = data["providers"]
-        assert len(providers) == 14
+        assert len(providers) == 19
         assert providers[0]["id"] == "spicylyrics"
         assert providers[0]["enabled"] is True
         assert providers[0]["priority"] == 1

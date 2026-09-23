@@ -73,11 +73,16 @@ enabled_providers:
   - "unison"         # Unison / Better Lyrics crowdsourced synced lyrics (TTML/YAML/LRC)
   - "binilyrics"     # BiniLyrics / Aligned REST API (TTML/LRC)
   - "lrclib"         # LRCLIB Database (YAML word-synced and LRC line-synced)
-  - "musixmatch"     # Musixmatch Desktop API (RichSync TTML word-sync & synced LRC)
-  - "qqmusic"        # QQ Music / Tencent API (synced LRC)
+  - "musixmatch"     # Musixmatch iOS Mobile API (RichSync TTML word-sync & synced LRC)
+  - "neblend"        # Apple Music + NetEase word timing (mild-lyrics neblend)
+  - "triblend"       # Apple Music + NetEase timing + QQ Music filler (mild-lyrics triblend)
+  - "kutriblend"     # Apple Music + NetEase timing + Kugou filler (mild-lyrics kutriblend)
+  - "netease"        # NetEase Cloud Music 163 API (YRC word-sync & LRC)
+  - "blend"          # Apple Music + QQ Music word timing (mild-lyrics blend)
+  - "qqmusic"        # QQ Music / Tencent API (QRC word-sync & LRC)
+  - "kublend"        # Apple Music + Kugou word timing (mild-lyrics kublend)
+  - "kugou"          # Kugou Music API (KRC word-sync & LRC)
   - "kuwo"           # Kuwo Music API (synced LRC)
-  - "netease"        # NetEase Cloud Music 163 API (synced LRC)
-  - "kugou"          # Kugou Music API (synced LRC)
   - "lyricsify"      # Lyricsify community LRC database
   - "genius"         # Genius database (plain lyrics fallback)
 
@@ -138,6 +143,8 @@ providers:
     enabled: true
     rate_limit_per_second: 2.0
     timeout_seconds: 10.0
+    extra:
+      token_path: "data/musixmatch_token.json"
     # api_key: "YOUR_MUSIXMATCH_USER_TOKEN"
 
   qqmusic:

@@ -1,5 +1,4 @@
-"""Unit tests for all 9 lyrics providers with mocked HTTP requests."""
-
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
@@ -13,7 +12,11 @@ from src.providers.kugou import KugouProvider
 from src.providers.kuwo import KuwoProvider
 from src.providers.lrclib import LrclibProvider
 from src.providers.lyricsify import LyricsifyProvider
-from src.providers.musixmatch import MusixmatchProvider
+from src.providers.musixmatch import (
+    MusixmatchProvider,
+    convert_richsync_to_ttml,
+    extract_musixmatch_writers,
+)
 from src.providers.netease import NetEaseProvider
 from src.providers.qqmusic import QQMusicProvider
 from src.providers.rmmrevival import RMMRevivalProvider
@@ -820,6 +823,153 @@ async def test_musixmatch_poisoned_lyrics_rejected(sample_track):
         # Poisoned lyrics detected -> MUST be rejected
         assert result is None
 
+
+@pytest.mark.asyncio
+async def test_musixmatch_token_caching_and_cold_cooldown(tmp_path):
+    token_file = tmp_path / "mxm_token.json"
+    provider = MusixmatchProvider(config=ProviderConfig(extra={"token_path": str(token_file)}))
+
+    # 1. First fetch retrieves token and saves to disk
+    mock_token_resp = MagicMock()
+    mock_token_resp.status_code = 200
+    mock_token_resp.json.return_value = {
+        "message": {"header": {"status_code": 200}, "body": {"user_token": "token_save_test_123"}}
+    }
+
+    with patch.object(provider, "request_with_retry", return_value=mock_token_resp) as mock_req:
+        token = await provider._get_user_token()
+        assert token == "token_save_test_123"
+        assert token_file.is_file()
+        assert "token_save_test_123" in token_file.read_text()
+        assert mock_req.call_count == 1
+
+    # 2. Second instance with same token_file reloads without network request
+    provider2 = MusixmatchProvider(config=ProviderConfig(extra={"token_path": str(token_file)}))
+    with patch.object(provider2, "request_with_retry") as mock_req2:
+        token2 = await provider2._get_user_token()
+        assert token2 == "token_save_test_123"
+        mock_req2.assert_not_called()
+
+    # 3. 401 response sets cold cooldown
+    provider3 = MusixmatchProvider(config=ProviderConfig(extra={"token_path": str(token_file)}))
+    mock_401_resp = MagicMock()
+    mock_401_resp.json.return_value = {"message": {"header": {"status_code": 401}}}
+
+    with patch.object(provider3, "request_with_retry", return_value=mock_401_resp):
+        token3 = await provider3._get_user_token(force=True)
+        # Should fallback to static token
+        assert token3 == "21051986b9886e2d7bd5d8295b15d605c14e13e33326a3a0e50e1b"
+        data = json.loads(token_file.read_text())
+        assert "cold" in data
+
+
+@pytest.mark.asyncio
+async def test_musixmatch_spotify_id_query(sample_track):
+    sample_track.spotify_id = "4u7EnebtmKWzUH433cf5Qv"
+    provider = MusixmatchProvider(config=ProviderConfig())
+
+    mock_token_resp = MagicMock()
+    mock_token_resp.json.return_value = {
+        "message": {"header": {"status_code": 200}, "body": {"user_token": "valid_token"}}
+    }
+
+    mock_macro_resp = MagicMock()
+    mock_macro_resp.json.return_value = {
+        "message": {
+            "header": {"status_code": 200},
+            "body": {
+                "macro_calls": {
+                    "matcher.track.get": {
+                        "message": {
+                            "body": {"track": {"track_name": "Bohemian Rhapsody", "artist_name": "Queen"}}
+                        }
+                    },
+                    "track.subtitles.get": {
+                        "message": {
+                            "header": {"status_code": 200},
+                            "body": {"subtitle_list": [{"subtitle": {"subtitle_body": "[00:01.00] Life"}}]},
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    with patch.object(provider, "request_with_retry", side_effect=[mock_token_resp, mock_macro_resp]) as mock_req:
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        # Verify track_spotify_id was passed in macro request params
+        macro_call_kwargs = mock_req.call_args_list[1]
+        assert macro_call_kwargs.kwargs["params"]["track_spotify_id"] == "4u7EnebtmKWzUH433cf5Qv"
+        assert macro_call_kwargs.kwargs["params"]["richsync_compact_type"] == "words"
+        assert "Musixmatch/" in macro_call_kwargs.kwargs["headers"]["X-User-Agent"]
+
+
+def test_musixmatch_richsync_gap_smoothing_and_zero_repair():
+    # Line 1: Word with zero duration (end == start == 1.0) and space token delimiting next word
+    # Line 2: Words with gap < 0.4s (smoothed) and gap >= 0.4s (preserved)
+    rs_data = [
+        {
+            "ts": 1.0,
+            "te": 2.5,
+            "l": [
+                {"c": "Hello", "o": 0.0},
+                {"c": " ", "o": 0.4},
+                {"c": "world", "o": 0.5},
+            ],
+            "x": "Hello world",
+        },
+        {
+            "ts": 3.0,
+            "te": 6.0,
+            "l": [
+                {"c": "One", "o": 0.0},
+                {"c": " ", "o": 0.5},
+                {"c": "two", "o": 0.6},
+                {"c": " ", "o": 1.0},
+                {"c": "three", "o": 2.0},  # gap from 4.0 to 5.0 is 1.0s >= 0.4s
+            ],
+            "x": "One two three",
+        },
+    ]
+
+    ttml = convert_richsync_to_ttml(rs_data, title="Song", artist="Artist")
+    assert ttml is not None
+    assert "<tt" in ttml
+    assert 'itunes:timing="Word"' in ttml
+    assert "Hello" in ttml
+    assert "world" in ttml
+    assert "One" in ttml
+
+
+def test_musixmatch_dewording_fallback():
+    # 5 lines with only 1 token per line (pseudo-word-sync)
+    rs_pseudo = [
+        {"ts": float(i * 3), "te": float(i * 3 + 2), "l": [{"c": f"Line {i}", "o": 0.0}], "x": f"Line {i}"}
+        for i in range(5)
+    ]
+    # convert_richsync_to_ttml should reject dewording (return None)
+    res = convert_richsync_to_ttml(rs_pseudo, title="Test", artist="Artist")
+    assert res is None
+
+
+def test_musixmatch_songwriters_extraction():
+    copyright_line = "Writer(s): Brian May, Freddie Mercury\nLyrics powered by Musixmatch"
+    writers = extract_musixmatch_writers(copyright_line)
+    assert writers == ["Brian May", "Freddie Mercury"]
+
+    rs_data = [
+        {
+            "ts": 1.0,
+            "te": 3.0,
+            "l": [{"c": "Test", "o": 0.0}, {"c": "song", "o": 0.5}],
+            "x": "Test song",
+        }
+    ]
+    ttml = convert_richsync_to_ttml(rs_data, title="Song", artist="Artist", songwriters=writers)
+    assert ttml is not None
+    assert "<songwriter>Brian May</songwriter>" in ttml
+    assert "<songwriter>Freddie Mercury</songwriter>" in ttml
 
 
 @pytest.mark.asyncio

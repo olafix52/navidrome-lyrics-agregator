@@ -13,7 +13,7 @@
 
 ## 🌟 Key Features
 
-- **Quality Cascade – 14 Lyrics Providers:**
+- **Quality Cascade – 19 Lyrics Providers:**
   1. `spicylyrics` – Spicy Lyrics Developer API (TTML syllable-level word-sync & LRC line-sync).
   2. `amll` – Apple Music-Like Lyrics DB (TTML syllable-level sync and multi-singer support).
   3. `apple_music` – Apple Music Catalog / AMLL lookup bridge (TTML).
@@ -21,13 +21,24 @@
   5. `unison` – Crowdsourced Better Lyrics Unison API (TTML, YAML, LRC).
   6. `binilyrics` – BiniLyrics / Aligned REST API (TTML & LRC).
   7. `lrclib` – LRCLIB Database (word-synced YAML & line-synced LRC).
-  8. `musixmatch` – Musixmatch Desktop API (RichSync word-synced TTML & LRC).
-  9. `qqmusic` – QQ Music / Tencent API (QRC word-synced TTML & LRC).
-  10. `kuwo` – Kuwo Music API (synced LRC).
-  11. `netease` – NetEase Cloud Music 163 API (YRC word-synced TTML & LRC).
-  12. `kugou` – Kugou Music API (KRC word-synced TTML & LRC).
-  13. `lyricsify` – Lyricsify community database (with FlareSolverr support).
-  14. `genius` – Genius API + HTML scraper (optional unsynchronized fallback).
+  8. `musixmatch` – Musixmatch iOS Mobile API (RichSync word-synced TTML & LRC with token caching, Spotify ID lookup, songwriter extraction, and gap-smoothing).
+  9. `neblend` – Apple Music text lines + NetEase word timing (mild-lyrics neblend).
+  10. `triblend` – Apple Music text lines + NetEase timing + QQ Music filler (mild-lyrics triblend).
+  11. `kutriblend` – Apple Music text lines + NetEase timing + Kugou filler (mild-lyrics kutriblend).
+  12. `netease` – NetEase Cloud Music 163 API (YRC word-synced TTML & LRC).
+  13. `blend` – Apple Music text lines + QQ Music word timing (mild-lyrics blend).
+  14. `qqmusic` – QQ Music / Tencent API (QRC word-synced TTML & LRC).
+  15. `kublend` – Apple Music text lines + Kugou word timing (mild-lyrics kublend).
+  16. `kugou` – Kugou Music API (KRC word-synced TTML & LRC).
+  17. `kuwo` – Kuwo Music API (synced LRC).
+  18. `lyricsify` – Lyricsify community database (with FlareSolverr support).
+  19. `genius` – Genius API + HTML scraper (optional unsynchronized fallback).
+
+- **Mild-Lyrics Blend Engine (Line & Word-Timing Fusion):**
+  - **5 Specialized Blend Providers:** Reconciles pristine lyrics and line splits from Apple Music / SpicyLyrics / LRCLIB with high-precision word/syllable timings from Asian streaming services (QQ Music QRC, NetEase YRC, Kugou KRC).
+  - **Intelligent Uncensoring & Slang Alignment:** Automatically restores censored donor words (e.g. `f***` -> `fucking`), aligns contractions (`it's`, `don't`), handles slang variations (`nothin'` -> `nothing`), and handles multi-word token splits.
+  - **Multi-donor Gap Filling (`triblend`, `kutriblend`):** Merges primary timing donors with auxiliary fallback donors to ensure complete timing coverage.
+  - **Clean Line Filtering:** Automatically ignores auxiliary metadata, translation (`x-translation`), and romanization (`x-roman`) spans.
 
 - **Flexible Storage & Audio Tag Writing (Embedded Lyrics):**
   - **Sidecar files:** Atomic saving of companion files (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) with quality resolution order (`.ttml` > `.yaml` > `.lrc`).
@@ -251,10 +262,15 @@ enabled_providers:
   - "binilyrics"
   - "lrclib"
   - "musixmatch"
-  - "qqmusic"
-  - "kuwo"
+  - "neblend"
+  - "triblend"
+  - "kutriblend"
   - "netease"
+  - "blend"
+  - "qqmusic"
+  - "kublend"
   - "kugou"
+  - "kuwo"
   - "lyricsify"
   - "genius"
 ```
@@ -315,7 +331,7 @@ Run the complete test suite covering TTML/YAML/LRC parsers, audio tag reading/wr
 ```bash
 pytest
 ```
-*140 unit tests passing (100% test coverage for all core components).*
+*158 unit tests passing (100% test coverage for all core components).*
 
 ---
 
