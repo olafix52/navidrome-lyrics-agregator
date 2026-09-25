@@ -124,13 +124,14 @@ class _BaseBlendProvider(BaseLyricsProvider):
         donor_res = results[1] if not isinstance(results[1], Exception) else None
         spare_res = results[2] if len(results) > 2 and not isinstance(results[2], Exception) else None
 
+        # A word-synced base (Apple Music / Spicy Lyrics syllable TTML) keeps its own timing:
+        # it is usually the most accurate, and re-timing it from a donor can only lose quality.
+        if base_res and base_res.sync_type == LyricsSyncType.WORD_SYNC:
+            logger.debug(f"[{self.name}] Base is already word-synced, returning it without blending")
+            return base_res
+
         if not base_res or not donor_res:
             return None
-
-        # If base is already word-synced and donor is not, return base as-is
-        if base_res.sync_type == LyricsSyncType.WORD_SYNC and donor_res.sync_type != LyricsSyncType.WORD_SYNC:
-            logger.debug(f"[{self.name}] Base is already word-synced and donor is not, returning base as-is")
-            return base_res
 
         # Reconcile base lines with donor word timings
         blended = blend_lyrics(

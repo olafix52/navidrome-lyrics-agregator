@@ -374,3 +374,146 @@ def test_parse_ttml_ignores_translation_and_romanization():
     assert lines[0].words[0].text == "Hello "
     assert lines[0].words[1].text == "world"
 
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: blended text must reproduce the base line exactly, and base
+# line order must survive donors timed against a different master.
+# ---------------------------------------------------------------------------
+
+import xml.etree.ElementTree as _ET
+
+from src.providers.kugou import convert_krc_to_ttml
+from src.providers.netease import convert_yrc_to_ttml
+
+_TT = "{http://www.w3.org/ns/ttml}"
+
+
+def _lrc(lines):
+    return "\n".join(f"[{int(t // 60):02d}:{t % 60:05.2f}]{x}" for t, x in lines)
+
+
+def _yrc(lines):
+    out = []
+    for ls, words in lines:
+        end = max(s + d for _, s, d in words)
+        out.append(f"[{int(ls * 1000)},{int((end - ls) * 1000)}]"
+                   + "".join(f"({int(s * 1000)},{int(d * 1000)},0){t}" for t, s, d in words))
+    return "\n".join(out)
+
+
+def _krc(lines):
+    out = []
+    for ls, words in lines:
+        end = max(s + d for _, s, d in words)
+        out.append(f"[{int(ls * 1000)},{int((end - ls) * 1000)}]"
+                   + "".join(f"<{int((s - ls) * 1000)},{int(d * 1000)},0>{t}" for t, s, d in words))
+    return "\n".join(out)
+
+
+def _res(name, content, fmt, sync):
+    return LyricsResult(provider_name=name, content=content, format=fmt, sync_type=sync,
+                        title="Song", artist="Artist", duration=200.0)
+
+
+def _base(lines):
+    return _res("apple_music", _lrc(lines), LyricsFormat.LRC, LyricsSyncType.LINE_SYNC)
+
+
+def _donor(ttml, name="netease"):
+    return _res(name, ttml, LyricsFormat.TTML, LyricsSyncType.WORD_SYNC)
+
+
+def _lines(result):
+    """[(begin_seconds, rendered_text, [span texts])] of a blended TTML result."""
+    out = []
+    for p in _ET.fromstring(result.content).iter(_TT + "p"):
+        spans = [s for s in p if s.tag == _TT + "span"]
+        begin = p.get("begin")
+        m, sec = begin.split(":")
+        out.append((int(m) * 60 + float(sec), "".join(s.text or "" for s in spans), [s.text for s in spans]))
+    return out
+
+
+def test_blend_syllable_donor_keeps_words_intact():
+    base = [(20.0, "You are beautiful tonight")]
+    donor = _krc([(20.0, [("You ", 20.0, .3), ("are ", 20.3, .3), ("beau", 20.6, .3), ("ti", 20.9, .2),
+                          ("ful ", 21.1, .4), ("to", 21.5, .3), ("night", 21.8, .6)])])
+    lines = _lines(blend_lyrics(_base(base), _donor(convert_krc_to_ttml(donor), "kugou")))
+    assert lines[0][1] == "You are beautiful tonight"
+    assert lines[0][2] == ["You ", "are ", "beau", "ti", "ful ", "to", "night"]
+
+
+def test_blend_leading_punctuation_stays_with_its_word():
+    base = [(30.0, 'She said "go" (go now!)')]
+    donor = _yrc([(30.0, [("She ", 30.0, .3), ("said ", 30.3, .3), ("go ", 30.6, .4), ("go ", 31.0, .4), ("now", 31.4, .5)])])
+    lines = _lines(blend_lyrics(_base(base), _donor(convert_yrc_to_ttml(donor))))
+    assert lines[0][1] == 'She said "go" (go now!)'
+    assert lines[0][2] == ["She ", "said ", '"go" ', "(go ", "now!)"]
+
+
+def test_blend_keeps_base_order_with_offset_donor_and_missing_line():
+    base = [(10.0, "First line here"), (13.0, "Middle line only in Apple"),
+            (16.0, "Third line here"), (19.0, "Fourth line here")]
+    donor = _yrc([(16.0, [("First ", 16.0, .5), ("line ", 16.5, .5), ("here", 17.0, .5)]),
+                  (22.0, [("Third ", 22.0, .5), ("line ", 22.5, .5), ("here", 23.0, .5)]),
+                  (25.0, [("Fourth ", 25.0, .5), ("line ", 25.5, .5), ("here", 26.0, .5)])])
+    lines = _lines(blend_lyrics(_base(base), _donor(convert_yrc_to_ttml(donor))))
+    assert [t for _, t, _ in lines] == [t for _, t in base]
+    # The Apple-only line is moved onto the donor timeline (+6 s)
+    assert lines[1][0] == pytest.approx(19.0)
+    assert [b for b, _, _ in lines] == sorted(b for b, _, _ in lines)
+
+
+def test_triblend_spare_donor_is_moved_onto_primary_timeline():
+    base = [(10.0, "Line one"), (14.0, "Line two only in spare"), (18.0, "Line three")]
+    primary = _yrc([(12.0, [("Line ", 12.0, .4), ("one", 12.4, .6)]), (20.0, [("Line ", 20.0, .4), ("three", 20.4, .6)])])
+    spare = _krc([(11.0, [("Line ", 11.0, .4), ("one", 11.4, .6)]),
+                  (15.0, [("Line ", 15.0, .3), ("two ", 15.3, .3), ("only ", 15.6, .3), ("in ", 15.9, .2), ("spare", 16.1, .5)]),
+                  (19.0, [("Line ", 19.0, .4), ("three", 19.4, .6)])])
+    lines = _lines(blend_lyrics(_base(base), _donor(convert_yrc_to_ttml(primary)),
+                                spare_donor=_donor(convert_krc_to_ttml(spare), "kugou")))
+    assert [t for _, t, _ in lines] == [t for _, t in base]
+    assert [b for b, _, _ in lines] == pytest.approx([12.0, 16.0, 20.0])
+
+
+def test_blend_partial_donor_coverage_keeps_word_separator():
+    base = [(1.0, "Hello there world"), (5.0, "Second line")]
+    donor = _yrc([(1.0, [("Hello ", 1.0, .5), ("there", 1.5, .5)]), (5.0, [("Second ", 5.0, .5), ("line", 5.5, .5)])])
+    lines = _lines(blend_lyrics(_base(base), _donor(convert_yrc_to_ttml(donor))))
+    assert [t for _, t, _ in lines] == ["Hello there world", "Second line"]
+
+
+def test_blend_cjk_and_censored_words():
+    base = [(1.0, "This is the first line"), (5.0, "What the fuck is going on"), (9.0, "我爱你中国")]
+    donor = _yrc([(1.0, [("This ", 1.0, .3), ("is ", 1.3, .2), ("the ", 1.5, .2), ("first ", 1.7, .4), ("line", 2.1, .5)]),
+                  (5.0, [("What ", 5.0, .3), ("the ", 5.3, .2), ("f*** ", 5.5, .4), ("is ", 5.9, .2), ("going ", 6.1, .4), ("on", 6.5, .5)]),
+                  (9.0, [("我", 9.0, .3), ("爱", 9.3, .3), ("你", 9.6, .3), ("中", 9.9, .3), ("国", 10.2, .5)])])
+    lines = _lines(blend_lyrics(_base(base), _donor(convert_yrc_to_ttml(donor))))
+    assert [t for _, t, _ in lines] == [t for _, t in base]
+    assert "fuck " in lines[1][2]
+    assert lines[2][2] == ["我", "爱", "你", "中", "国"]
+
+
+@pytest.mark.asyncio
+async def test_blend_provider_keeps_word_synced_base_even_with_word_synced_donor():
+    """Apple's own word timing is never replaced by donor timing."""
+    provider = AppleNetEaseBlendProvider(config=ProviderConfig())
+    track = TrackMetadata(file_path=Path("dummy.mp3"), title="Song", artist="Artist", duration=180.0)
+    base = LyricsResult(provider_name="apple_music", format=LyricsFormat.TTML, sync_type=LyricsSyncType.WORD_SYNC,
+                        content="<tt>apple word timing</tt>", title="Song", artist="Artist")
+    donor = LyricsResult(provider_name="netease", format=LyricsFormat.TTML, sync_type=LyricsSyncType.WORD_SYNC,
+                         content="<tt>netease word timing</tt>", title="Song", artist="Artist")
+
+    with patch.object(provider, "_fetch_base", return_value=base), \
+         patch.object(provider, "_fetch_donor", return_value=donor):
+        res = await provider.get_lyrics(track)
+    assert res is not None and res.content == "<tt>apple word timing</tt>"
+
+    # ...also when no donor was found at all
+    with patch.object(provider, "_fetch_base", return_value=base), \
+         patch.object(provider, "_fetch_donor", return_value=None):
+        res = await provider.get_lyrics(track)
+    assert res is not None and res.content == "<tt>apple word timing</tt>"
+
+    await provider.close()
