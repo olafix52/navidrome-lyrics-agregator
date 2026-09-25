@@ -444,3 +444,31 @@ def karaoke_to_ttml(lines: List[KaraokeLine], title: str = "", artist: str = "")
 </tt>"""
     return ttml_xml
 
+
+
+# Credit / metadata lines that Chinese services (NetEase, QQ Music, Kugou) and some others
+# put into the lyrics body: "作词 : X", "作曲：X", "编曲 : X", "Lyrics by: X", ...
+_CREDIT_LINE = re.compile(
+    r"^(?:作词|作曲|编曲|制作人?|监制|混音|母带|录音|和声|伴奏|吉他|贝斯|鼓|键盘|弦乐|出品|发行|企划|统筹|"
+    r"词|曲|OP|SP|ISRC|Lyrics?(?:\s+by)?|Lyricist|Written\s+by|Composers?|Composed\s+by|Music\s+by|"
+    r"Arranger|Arranged\s+by|Producers?|Produced\s+by|Mixed\s+by|Mastered\s+by|Recorded\s+by)\s*[:：]",
+    re.IGNORECASE,
+)
+_LEADING_TAGS = re.compile(r"^(?:\s*\[[^\]]*\])+")
+_NO_LYRICS_MARKERS = ("纯音乐，请欣赏", "纯音乐, 请欣赏", "此歌曲为没有填词的纯音乐")
+
+
+def count_lyric_lines(content: str, fmt: LyricsFormat) -> int:
+    """Number of lines that contain actual lyrics (not timestamps, credits or 'instrumental' notes).
+
+    Some sources return a "lyrics" document for songs they have no lyrics for, consisting only
+    of credit lines (lyricist/composer) or an instrumental marker. Such results must be treated
+    as "not found": saving them makes the track look like it has lyrics.
+    """
+    count = 0
+    for line in parse_lyrics_to_karaoke(content or "", fmt):
+        text = _LEADING_TAGS.sub("", line.text or "").strip()
+        if not text or _CREDIT_LINE.match(text) or any(m in text for m in _NO_LYRICS_MARKERS):
+            continue
+        count += 1
+    return count

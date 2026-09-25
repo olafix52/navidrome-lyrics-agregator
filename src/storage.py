@@ -175,6 +175,10 @@ def get_existing_lyrics_rank(
         content = lyrics_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    from src.web.parser import count_lyric_lines  # local import: parser depends on models only
+
+    if count_lyric_lines(content, fmt) == 0:
+        return (0, 0)  # e.g. credits-only file: any real lyrics are an upgrade
     return lyrics_quality_rank(detect_sync_type(content, fmt), fmt)
 
 

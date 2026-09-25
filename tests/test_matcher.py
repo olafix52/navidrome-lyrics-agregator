@@ -664,3 +664,36 @@ async def test_manual_search_cache_is_bounded(tmp_path: Path):
 
     matcher._store_search_results("fresh", 1000.0 + matcher._cache_ttl + 1, [])
     assert list(matcher._search_cache) == ["fresh"]  # expired entries evicted
+
+
+CREDITS_ONLY_LRC = "[00:00.00-1] 作词 : Chief Keef\n[00:00.00-1] 作曲 : Chief Keef"
+
+
+def test_count_lyric_lines_ignores_credits_and_instrumental_markers():
+    from src.web.parser import count_lyric_lines
+
+    assert count_lyric_lines(CREDITS_ONLY_LRC, LyricsFormat.LRC) == 0
+    assert count_lyric_lines("[00:01.00]纯音乐，请欣赏", LyricsFormat.LRC) == 0
+    assert count_lyric_lines("[00:00.10]Lyrics by: Someone\n[00:05.00]Real line", LyricsFormat.LRC) == 1
+    assert count_lyric_lines("[00:05.00]Hello\n[00:07.00]World", LyricsFormat.LRC) == 2
+
+
+@pytest.mark.asyncio
+async def test_credits_only_result_is_not_found_and_never_rewritten(tmp_path: Path):
+    """NetEase returns credit lines only for songs without lyrics; that must not count as lyrics."""
+    audio_path = tmp_path / "song.flac"
+    audio_path.write_bytes(b"dummy")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+    credits = LyricsResult(content=CREDITS_ONLY_LRC, format=LyricsFormat.LRC, sync_type=LyricsSyncType.LINE_SYNC,
+                           provider_name="netease", title="Song", artist="Artist", duration=200.0)
+
+    config = AppConfig(music_dir=tmp_path, cache={"enabled": False})
+    res = await LyricsMatcher(config, [MockProvider("netease", credits)]).process_track(track)
+    assert res.status == MatchStatus.NOT_FOUND
+    assert not (tmp_path / "song.lrc").exists()
+
+    # A credits-only file already on disk (saved by older versions) is replaced by real lyrics
+    (tmp_path / "song.lrc").write_text(CREDITS_ONLY_LRC, encoding="utf-8")
+    res = await LyricsMatcher(config, [MockProvider("p1", _lrc_result())]).process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert "Hello world" in (tmp_path / "song.lrc").read_text(encoding="utf-8")

@@ -15,6 +15,7 @@ from src.models import (
     TrackMetadata,
 )
 from src.normalizer import verify_track_match
+from src.web.parser import count_lyric_lines
 from src.providers.base import BaseLyricsProvider, FetchScope
 from src.storage import (
     get_existing_lyrics_rank,
@@ -229,6 +230,10 @@ class LyricsMatcher:
             logger.debug(f"[{provider_name}] Plain lyrics ignored (allow_plain_lyrics=False)")
             return None
 
+        if count_lyric_lines(lyrics.content, lyrics.format) == 0:
+            logger.debug(f"[{provider_name}] Rejected: no lyric lines (only credits / instrumental marker)")
+            return None
+
         is_match, score, reason = verify_track_match(
             expected_title=track.clean_title or track.title,
             expected_artist=track.clean_artist or track.artist,
@@ -439,6 +444,8 @@ class LyricsMatcher:
                     timeout=timeout_per_provider,
                 )
                 if not lyrics or not lyrics.content:
+                    return None
+                if count_lyric_lines(lyrics.content, lyrics.format) == 0:
                     return None
 
                 is_match, score, _ = verify_track_match(
