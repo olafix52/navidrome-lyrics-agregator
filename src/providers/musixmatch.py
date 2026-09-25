@@ -32,12 +32,36 @@ MXM_COLD = 1800.0  # 30 minutes cooldown after 401/captcha
 FALLBACK_STATIC_TOKEN = "21051986b9886e2d7bd5d8295b15d605c14e13e33326a3a0e50e1b"
 
 
+class _PoisonedLyrics(Exception):
+    """Musixmatch served anti-scraping honeypot lyrics."""
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """Musixmatch sends ``"body": []`` (a list) for calls without results; treat it as empty."""
+    return value if isinstance(value, dict) else {}
+
+
+def _macro_call(macro_calls: Dict[str, Any], name: str) -> "tuple[int, Dict[str, Any]]":
+    """(status_code, body) of one call inside a macro response, tolerant of list/empty bodies."""
+    message = _as_dict(_as_dict(macro_calls.get(name)).get("message"))
+    status = _as_dict(message.get("header")).get("status_code", 0)
+    return status, _as_dict(message.get("body"))
+
+
 def is_poisoned_lyrics(text: str) -> bool:
     """Detect Musixmatch anti-scraping dummy honeypot lyrics (e.g. 'Wob gopini den...')."""
     if not text:
         return False
     lower = text.lower()
     return any(p in lower for p in POISONED_PATTERNS)
+
+
+_MXM_FOOTER = re.compile(r"\n*\*{3,}\s*This Lyrics is NOT for Commercial use.*$", re.I | re.S)
+
+
+def strip_musixmatch_footer(text: str) -> str:
+    """Remove the '******* This Lyrics is NOT for Commercial use *******' footer (+ tracking id)."""
+    return _MXM_FOOTER.sub("", text or "").strip()
 
 
 def extract_musixmatch_writers(*bodies: Any) -> List[str]:
@@ -63,6 +87,37 @@ def extract_musixmatch_writers(*bodies: Any) -> List[str]:
         if names:
             return names
     return []
+
+
+def _apply_line_separators(tokens: List[Dict[str, Any]], line_text: str) -> None:
+    """Make the tokens' concatenated text match the line text ``x`` (word spacing).
+
+    TTML spans are rendered back to back, so each token must carry the whitespace that
+    follows it. RichSync usually sends explicit space entries (already attached); when it
+    does not, the separators are taken from the line text. The last token never keeps a
+    trailing separator.
+    """
+    if not tokens:
+        return
+    if line_text and "".join(t["text"] for t in tokens).strip() != line_text:
+        pos = 0
+        aligned: List[str] = []
+        for t in tokens:
+            word = t["text"].strip()
+            at = line_text.find(word, pos) if word else -1
+            if at < 0 or line_text[pos:at].strip():
+                aligned = []
+                break
+            end = at + len(word)
+            sep_end = end
+            while sep_end < len(line_text) and line_text[sep_end].isspace():
+                sep_end += 1
+            aligned.append(word + line_text[end:sep_end])
+            pos = sep_end
+        if aligned and pos >= len(line_text.rstrip()):
+            for t, text in zip(tokens, aligned):
+                t["text"] = text
+    tokens[-1]["text"] = tokens[-1]["text"].rstrip()
 
 
 def convert_richsync_to_ttml(
@@ -122,8 +177,11 @@ def convert_richsync_to_ttml(
             at = ts + offset
 
             if not text.strip():
-                # Whitespace / space token: marks when preceding word ended singing
+                # Whitespace / space token: marks when preceding word ended singing, and is
+                # the separator between the two words
                 gap = at if gap is None else gap
+                if out_tokens and not out_tokens[-1]["text"].endswith(text):
+                    out_tokens[-1]["text"] += text
                 continue
 
             if out_tokens:
@@ -142,6 +200,7 @@ def convert_richsync_to_ttml(
             out_tokens[-1]["end_s"] = max(out_tokens[-1]["start_s"], te)
             for a, b in zip(out_tokens, out_tokens[1:]):
                 a["end_s"] = min(max(a["end_s"], a["start_s"]), b["start_s"])
+            _apply_line_separators(out_tokens, line_text)
 
         parsed_lines.append({
             "start_s": ts,
@@ -321,6 +380,7 @@ class MusixmatchProvider(BaseLyricsProvider):
                 message = data.get("message", {})
                 status_code = message.get("header", {}).get("status_code", 0)
                 if status_code in (401, 402):
+                    logger.warning(f"[{self.name}] Token request refused (401/captcha), cooling down for {int(MXM_COLD // 60)} min")
                     self._record_cold_cooldown(now)
                     return FALLBACK_STATIC_TOKEN
 
@@ -342,7 +402,8 @@ class MusixmatchProvider(BaseLyricsProvider):
     async def get_lyrics(self, track: TrackMetadata) -> Optional[LyricsResult]:
         token = await self._get_user_token()
         if not token:
-            logger.warning(f"[{self.name}] No user token available")
+            # Only happens during the cooldown after a 401/captcha; logged when it starts
+            logger.debug(f"[{self.name}] No user token available (cooldown)")
             return None
 
         api_base = self.config.custom_url or self.DEFAULT_API_BASE
@@ -383,135 +444,228 @@ class MusixmatchProvider(BaseLyricsProvider):
         if sp_id:
             params["track_spotify_id"] = sp_id
 
-        response = await self.request_with_retry("GET", macro_endpoint, params=params, headers=self.IOS_HEADERS)
+        message = await self._request_macro(macro_endpoint, params)
+        if message is None:
+            return None  # request failed / unauthorized: a search would fail the same way
+        try:
+            result = self._parse_macro(message, title, artist)
+        except _PoisonedLyrics:
+            return None  # anti-scraping honeypot: do not spend more requests on this track
+        if result is not None and result.sync_type != LyricsSyncType.UNSYNCED:
+            return result
+
+        # Musixmatch's matcher sometimes resolves a query to an empty stub entry (no length,
+        # no subtitles) although the song has synced lyrics under another track id. Look the
+        # track up by search and fetch that entry directly.
+        fallback_id = await self._search_track_id(params["usertoken"], title, artist, track.duration)
+        if fallback_id is not None and fallback_id != (result.metadata.get("musixmatch_track_id") if result else None):
+            by_id = {k: v for k, v in params.items() if not k.startswith(("q_", "f_subtitle", "track_spotify_id"))}
+            by_id["track_id"] = str(fallback_id)
+            message = await self._request_macro(macro_endpoint, by_id)
+            try:
+                fallback = self._parse_macro(message, title, artist) if message is not None else None
+            except _PoisonedLyrics:
+                fallback = None
+            if fallback is not None and (result is None or fallback.sync_type != LyricsSyncType.UNSYNCED):
+                return fallback
+        return result
+
+    async def _request_macro(self, endpoint: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """GET a macro endpoint (refreshing the token once on 401/402). Returns its ``message`` if OK."""
+        response = await self.request_with_retry("GET", endpoint, params=params, headers=self.IOS_HEADERS)
         if not response:
             return None
-
         try:
-            data = response.json()
-            message = data.get("message", {})
-            header = message.get("header", {})
-
-            status_code = header.get("status_code", 0)
+            message = _as_dict(_as_dict(response.json()).get("message"))
+            status_code = _as_dict(message.get("header")).get("status_code", 0)
             if status_code in (401, 402):
                 logger.debug(f"[{self.name}] Unauthorized (401/402), invalidating token and attempting retry")
                 self._user_token = None
                 token = await self._get_user_token(force=True)
-                if token:
-                    params["usertoken"] = token
-                    response = await self.request_with_retry(
-                        "GET", macro_endpoint, params=params, headers=self.IOS_HEADERS
-                    )
-                    if response:
-                        data = response.json()
-                        message = data.get("message", {})
-                        header = message.get("header", {})
-                        status_code = header.get("status_code", 0)
-
-            if status_code != 200:
-                return None
-
-            macro_calls = message.get("body", {}).get("macro_calls", {})
-
-            # Extract track info if available
-            track_call = macro_calls.get("matcher.track.get", {})
-            track_data = track_call.get("message", {}).get("body", {}).get("track", {})
-            cand_title = track_data.get("track_name")
-            cand_artist = track_data.get("artist_name")
-            cand_duration = safe_float(track_data.get("track_length"))
-            track_id = track_data.get("track_id")
-
-            # Extract songwriters from copyright headers
-            richsync_call = macro_calls.get("track.richsync.get", {})
-            rich_body_obj = richsync_call.get("message", {}).get("body", {}).get("richsync", {})
-            subtitles_call = macro_calls.get("track.subtitles.get", {})
-            sub_list = subtitles_call.get("message", {}).get("body", {}).get("subtitle_list", [])
-            sub_obj = sub_list[0].get("subtitle", {}) if sub_list else {}
-            lyrics_call = macro_calls.get("track.lyrics.get", {})
-            lyr_obj = lyrics_call.get("message", {}).get("body", {}).get("lyrics", {})
-
-            songwriters = extract_musixmatch_writers(rich_body_obj, sub_obj, lyr_obj)
-
-            # Verify that the matched track actually corresponds to the requested track
-            if cand_title and cand_artist:
-                score = calculate_candidate_score(title, artist, cand_title, cand_artist)
-                if score < self.config.extra.get("min_similarity", 0.6):
-                    logger.debug(
-                        f"[{self.name}] Rejecting mismatched candidate: requested '{artist} - {title}', "
-                        f"got '{cand_artist} - {cand_title}' (score: {score:.2f})"
-                    )
+                if not token:
                     return None
-            else:
-                cand_title = title
-                cand_artist = artist
-                score = 1.0
+                params["usertoken"] = token
+                response = await self.request_with_retry("GET", endpoint, params=params, headers=self.IOS_HEADERS)
+                if not response:
+                    return None
+                message = _as_dict(_as_dict(response.json()).get("message"))
+                status_code = _as_dict(message.get("header")).get("status_code", 0)
+            return message if status_code == 200 else None
+        except Exception as e:
+            logger.debug(f"[{self.name}] Invalid macro response: {e}")
+            return None
 
-            # 1. Attempt syllable-level RichSync TTML first
-            if richsync_call.get("message", {}).get("header", {}).get("status_code") == 200:
-                rs_body = rich_body_obj.get("richsync_body")
-                if rs_body and not is_poisoned_lyrics(str(rs_body)):
-                    ttml_content = convert_richsync_to_ttml(
-                        rs_body,
-                        title=cand_title,
-                        artist=cand_artist,
-                        songwriters=songwriters,
-                    )
-                    if ttml_content and not is_poisoned_lyrics(ttml_content):
-                        return LyricsResult(
-                            content=ttml_content,
-                            format=LyricsFormat.TTML,
-                            sync_type=LyricsSyncType.WORD_SYNC,
-                            provider_name=self.name,
-                            duration=cand_duration,
-                            title=cand_title,
-                            artist=cand_artist,
-                            match_score=score,
-                            metadata={"musixmatch_track_id": track_id, "type": "richsync"},
-                        )
+    async def _search_track_id(
+        self, token: str, title: str, artist: str, duration: float
+    ) -> Optional[int]:
+        """Best ``track.search`` hit that has synced lyrics and matches name and duration.
 
-            # 2. Fallback to line-synced LRC from track.subtitles.get
-            if subtitles_call.get("message", {}).get("header", {}).get("status_code") == 200:
-                if sub_list and isinstance(sub_list, list):
-                    sub_body = sub_obj.get("subtitle_body", "")
-                    if sub_body and isinstance(sub_body, str) and sub_body.strip():
-                        if is_poisoned_lyrics(sub_body):
-                            logger.debug(f"[{self.name}] Honeypot/poisoned lyrics detected in subtitle body, rejecting.")
-                            return None
-                        return LyricsResult(
-                            content=sub_body.strip(),
-                            format=LyricsFormat.LRC,
-                            sync_type=LyricsSyncType.LINE_SYNC,
-                            provider_name=self.name,
-                            duration=safe_float(sub_obj.get("subtitle_length")) or cand_duration,
-                            title=cand_title,
-                            artist=cand_artist,
-                            match_score=score,
-                            metadata={
-                                "musixmatch_id": sub_obj.get("subtitle_id"),
-                                "musixmatch_track_id": track_id,
-                            },
-                        )
+        Search results mix live versions, remixes and covers, so candidates are filtered by
+        title/artist similarity and (when both are known) a duration within 3 seconds, then
+        ranked by word-sync availability and Musixmatch's popularity rating.
+        """
+        api_base = self.config.custom_url or self.DEFAULT_API_BASE
+        params = {
+            "format": "json",
+            "app_id": self.APP_ID,
+            "usertoken": token,
+            "q_track": title,
+            "q_artist": artist,
+            "f_has_lyrics": "1",
+            "s_track_rating": "desc",
+            "page_size": "10",
+        }
+        response = await self.request_with_retry(
+            "GET", f"{api_base.rstrip('/')}/track.search", params=params, headers=self.IOS_HEADERS
+        )
+        if not response:
+            return None
+        try:
+            body = _as_dict(_as_dict(_as_dict(response.json()).get("message")).get("body"))
+            track_list = body.get("track_list")
+            track_list = track_list if isinstance(track_list, list) else []
+        except Exception as e:
+            logger.debug(f"[{self.name}] Invalid track.search response: {e}")
+            return None
 
-            # 3. Fallback to plain lyrics from track.lyrics.get if available
-            if lyrics_call.get("message", {}).get("header", {}).get("status_code") == 200:
-                lyr_body = lyr_obj.get("lyrics_body", "")
-                if lyr_body and isinstance(lyr_body, str) and lyr_body.strip():
-                    if is_poisoned_lyrics(lyr_body):
-                        logger.debug(f"[{self.name}] Honeypot/poisoned lyrics detected in plain lyrics body, rejecting.")
-                        return None
+        min_similarity = self.config.extra.get("min_similarity", 0.6)
+        best_key, best_id = None, None
+        for entry in track_list:
+            cand = _as_dict(_as_dict(entry).get("track"))
+            if not (cand.get("has_subtitles") or cand.get("has_richsync")) or not cand.get("track_id"):
+                continue
+            score = calculate_candidate_score(title, artist, cand.get("track_name") or "", cand.get("artist_name") or "")
+            if score < min_similarity:
+                continue
+            length = safe_float(cand.get("track_length")) or 0.0
+            if duration > 0 and length > 0 and abs(length - duration) > 3.0:
+                continue  # different version (live, edit, remix)
+            verified = length > 0 and duration > 0
+            key = (
+                verified,  # duration actually checked
+                bool(cand.get("has_richsync")),
+                round(score, 2),
+                -abs(length - duration) if verified else 0.0,
+                safe_float(cand.get("track_rating")) or 0.0,
+            )
+            if best_key is None or key > best_key:
+                best_key, best_id = key, int(cand["track_id"])
+        if best_id is not None:
+            logger.debug(f"[{self.name}] Matcher found no synced lyrics; using search result track_id={best_id}")
+        return best_id
+
+    def _parse_macro(self, message: Dict[str, Any], title: str, artist: str) -> Optional[LyricsResult]:
+        """Best lyrics (RichSync TTML > LRC > plain) contained in a macro.subtitles.get response."""
+        try:
+            return self._parse_macro_calls(message, title, artist)
+        except _PoisonedLyrics:
+            raise
+        except Exception as e:
+            logger.debug(f"[{self.name}] Error parsing macro response: {e}")
+            return None
+
+    def _parse_macro_calls(self, message: Dict[str, Any], title: str, artist: str) -> Optional[LyricsResult]:
+        macro_calls = _as_dict(_as_dict(message.get("body")).get("macro_calls"))
+
+        # Calls without a result come back with a list body instead of an object, so every
+        # level is read defensively: one missing part must not discard the others.
+        _, track_body = _macro_call(macro_calls, "matcher.track.get")
+        track_data = _as_dict(track_body.get("track"))
+        cand_title = track_data.get("track_name")
+        cand_artist = track_data.get("artist_name")
+        cand_duration = safe_float(track_data.get("track_length"))
+        track_id = track_data.get("track_id")
+
+        richsync_status, richsync_body = _macro_call(macro_calls, "track.richsync.get")
+        rich_body_obj = _as_dict(richsync_body.get("richsync"))
+        subtitles_status, subtitles_body = _macro_call(macro_calls, "track.subtitles.get")
+        sub_list = subtitles_body.get("subtitle_list")
+        sub_list = sub_list if isinstance(sub_list, list) else []
+        sub_obj = _as_dict(_as_dict(sub_list[0]).get("subtitle")) if sub_list else {}
+        lyrics_status, lyrics_body = _macro_call(macro_calls, "track.lyrics.get")
+        lyr_obj = _as_dict(lyrics_body.get("lyrics"))
+
+        # Extract songwriters from copyright headers
+
+        songwriters = extract_musixmatch_writers(rich_body_obj, sub_obj, lyr_obj)
+
+        # Verify that the matched track actually corresponds to the requested track
+        if cand_title and cand_artist:
+            score = calculate_candidate_score(title, artist, cand_title, cand_artist)
+            if score < self.config.extra.get("min_similarity", 0.6):
+                logger.debug(
+                    f"[{self.name}] Rejecting mismatched candidate: requested '{artist} - {title}', "
+                    f"got '{cand_artist} - {cand_title}' (score: {score:.2f})"
+                )
+                return None
+        else:
+            cand_title = title
+            cand_artist = artist
+            score = 1.0
+
+        # 1. Attempt syllable-level RichSync TTML first
+        if richsync_status == 200:
+            rs_body = rich_body_obj.get("richsync_body")
+            if rs_body and not is_poisoned_lyrics(str(rs_body)):
+                ttml_content = convert_richsync_to_ttml(
+                    rs_body,
+                    title=cand_title,
+                    artist=cand_artist,
+                    songwriters=songwriters,
+                )
+                if ttml_content and not is_poisoned_lyrics(ttml_content):
                     return LyricsResult(
-                        content=lyr_body.strip(),
-                        format=LyricsFormat.TXT,
-                        sync_type=LyricsSyncType.UNSYNCED,
+                        content=ttml_content,
+                        format=LyricsFormat.TTML,
+                        sync_type=LyricsSyncType.WORD_SYNC,
                         provider_name=self.name,
                         duration=cand_duration,
                         title=cand_title,
                         artist=cand_artist,
                         match_score=score,
-                        metadata={"musixmatch_track_id": track_id},
+                        metadata={"musixmatch_track_id": track_id, "type": "richsync"},
                     )
 
-        except Exception as e:
-            logger.debug(f"[{self.name}] Error parsing macro response: {e}")
+        # 2. Fallback to line-synced LRC from track.subtitles.get
+        if subtitles_status == 200:
+            if sub_list:
+                sub_body = sub_obj.get("subtitle_body", "")
+                if sub_body and isinstance(sub_body, str) and sub_body.strip():
+                    if is_poisoned_lyrics(sub_body):
+                        logger.debug(f"[{self.name}] Honeypot/poisoned lyrics detected in subtitle body, rejecting.")
+                        raise _PoisonedLyrics()
+                    return LyricsResult(
+                        content=sub_body.strip(),
+                        format=LyricsFormat.LRC,
+                        sync_type=LyricsSyncType.LINE_SYNC,
+                        provider_name=self.name,
+                        duration=safe_float(sub_obj.get("subtitle_length")) or cand_duration,
+                        title=cand_title,
+                        artist=cand_artist,
+                        match_score=score,
+                        metadata={
+                            "musixmatch_id": sub_obj.get("subtitle_id"),
+                            "musixmatch_track_id": track_id,
+                        },
+                    )
+
+        # 3. Fallback to plain lyrics from track.lyrics.get if available
+        if lyrics_status == 200:
+            lyr_body = strip_musixmatch_footer(lyr_obj.get("lyrics_body") or "")
+            if lyr_body:
+                if is_poisoned_lyrics(lyr_body):
+                    logger.debug(f"[{self.name}] Honeypot/poisoned lyrics detected in plain lyrics body, rejecting.")
+                    raise _PoisonedLyrics()
+                return LyricsResult(
+                    content=lyr_body.strip(),
+                    format=LyricsFormat.TXT,
+                    sync_type=LyricsSyncType.UNSYNCED,
+                    provider_name=self.name,
+                    duration=cand_duration,
+                    title=cand_title,
+                    artist=cand_artist,
+                    match_score=score,
+                    metadata={"musixmatch_track_id": track_id},
+                )
 
         return None

@@ -768,10 +768,16 @@ async def test_musixmatch_mismatched_candidate_rejected(sample_track):
         }
     }
 
-    with patch.object(provider, "request_with_retry", side_effect=[mock_token_resp, mock_macro_resp]):
+    # After rejecting the mismatched match, the provider searches for the right entry
+    mock_search_resp = MagicMock()
+    mock_search_resp.json.return_value = {"message": {"header": {"status_code": 200}, "body": {"track_list": []}}}
+
+    with patch.object(provider, "request_with_retry",
+                      side_effect=[mock_token_resp, mock_macro_resp, mock_search_resp]) as mock_req:
         result = await provider.get_lyrics(sample_track)
         # Queen - Bohemian Rhapsody requested, but Drake - NOKIA returned -> MUST be rejected
         assert result is None
+        assert mock_req.call_count == 3
 
 
 @pytest.mark.asyncio
@@ -1753,3 +1759,110 @@ async def test_spicylyrics_timestamp_minute_boundary(sample_track):
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Musixmatch regressions (response shapes observed from the live API)
+# ---------------------------------------------------------------------------
+
+
+def _mxm_resp(payload):
+    resp = MagicMock()
+    resp.json.return_value = payload
+    return resp
+
+
+def _mxm_macro(track=None, subtitles=None, richsync=None, lyrics=None):
+    """macro.subtitles.get payload; missing calls get a 404 with a *list* body, like the real API."""
+    def call(body):
+        if body is None:
+            return {"message": {"header": {"status_code": 404}, "body": []}}
+        return {"message": {"header": {"status_code": 200}, "body": body}}
+    return {"message": {"header": {"status_code": 200}, "body": {"macro_calls": {
+        "matcher.track.get": call({"track": track} if track else None),
+        "track.subtitles.get": call({"subtitle_list": [{"subtitle": subtitles}]} if subtitles else {"subtitle_list": []}),
+        "track.richsync.get": call({"richsync": richsync} if richsync else None),
+        "track.lyrics.get": call({"lyrics": lyrics} if lyrics else None),
+        "userblob.get": call(None),
+    }}}}
+
+
+QUEEN = {"track_id": 1, "track_name": "Bohemian Rhapsody", "artist_name": "Queen", "track_length": 354}
+
+
+@pytest.mark.asyncio
+async def test_musixmatch_uses_subtitles_when_other_calls_have_list_bodies(sample_track):
+    """404 sub-calls carry ``"body": []``; that must not discard the available LRC."""
+    provider = MusixmatchProvider(config=ProviderConfig(api_key="tok"))
+    macro = _mxm_macro(track=QUEEN, subtitles={"subtitle_body": "[00:01.00]Is this the real life?", "subtitle_length": 354})
+    with patch.object(provider, "request_with_retry", side_effect=[_mxm_resp(macro)]):
+        result = await provider.get_lyrics(sample_track)
+    assert result is not None
+    assert result.sync_type == LyricsSyncType.LINE_SYNC
+    assert result.content == "[00:01.00]Is this the real life?"
+
+
+def test_musixmatch_richsync_keeps_word_spacing():
+    import xml.etree.ElementTree as ET
+
+    rich = [
+        # Real API shape: words and " " entries with offsets relative to ts
+        {"ts": 10.0, "te": 12.0, "x": "Hello darkness, my old friend",
+         "l": [{"c": "Hello", "o": 0}, {"c": " ", "o": 0.5}, {"c": "darkness,", "o": 0.55}, {"c": " ", "o": 1.2},
+               {"c": "my", "o": 1.25}, {"c": " ", "o": 1.4}, {"c": "old", "o": 1.45}, {"c": " ", "o": 1.6}, {"c": "friend", "o": 1.65}]},
+        # Without space entries the separators come from the line text
+        {"ts": 14.0, "te": 16.0, "x": "I've come to talk",
+         "l": [{"c": "I've", "o": 0}, {"c": "come", "o": 0.4}, {"c": "to", "o": 0.8}, {"c": "talk", "o": 1.1}]},
+        {"ts": 18.0, "te": 19.0, "x": "Because a vision",
+         "l": [{"c": "Because", "o": 0}, {"c": " ", "o": 0.4}, {"c": "a", "o": 0.45}, {"c": " ", "o": 0.5}, {"c": "vision", "o": 0.55}]},
+    ]
+    ttml = convert_richsync_to_ttml(rich)
+    ns = "{http://www.w3.org/ns/ttml}"
+    texts = ["".join(s.text or "" for s in p if s.tag == ns + "span") for p in ET.fromstring(ttml).iter(ns + "p")]
+    assert texts == ["Hello darkness, my old friend", "I've come to talk", "Because a vision"]
+
+
+@pytest.mark.asyncio
+async def test_musixmatch_search_fallback_picks_matching_version(sample_track):
+    """Matcher lands on an empty stub -> track.search -> right version fetched by track_id."""
+    provider = MusixmatchProvider(config=ProviderConfig(api_key="tok"))
+    stub = _mxm_macro(track={**QUEEN, "track_id": 99, "track_length": 0})
+    search = {"message": {"header": {"status_code": 200}, "body": {"track_list": [
+        {"track": {"track_id": 10, "track_name": "Bohemian Rhapsody - Live", "artist_name": "Queen", "track_length": 420, "has_subtitles": 1, "has_richsync": 1, "track_rating": 90}},
+        {"track": {"track_id": 11, "track_name": "Bohemian Rhapsody", "artist_name": "Panic! At The Disco", "track_length": 354, "has_subtitles": 1, "has_richsync": 1, "track_rating": 80}},
+        {"track": {"track_id": 12, "track_name": "Bohemian Rhapsody", "artist_name": "Queen", "track_length": 355, "has_subtitles": 1, "has_richsync": 0, "track_rating": 70}},
+        {"track": {"track_id": 13, "track_name": "Bohemian Rhapsody", "artist_name": "Queen", "track_length": 0, "has_subtitles": 1, "has_richsync": 1, "track_rating": 60}},
+    ]}}}
+    right = _mxm_macro(track={**QUEEN, "track_id": 12, "track_length": 355},
+                       subtitles={"subtitle_body": "[00:01.00]Is this the real life?", "subtitle_length": 355})
+
+    with patch.object(provider, "request_with_retry",
+                      side_effect=[_mxm_resp(stub), _mxm_resp(search), _mxm_resp(right)]) as mock_req:
+        result = await provider.get_lyrics(sample_track)
+
+    assert result is not None and result.sync_type == LyricsSyncType.LINE_SYNC
+    assert result.metadata["musixmatch_track_id"] == 12
+    by_id_params = mock_req.call_args_list[2].kwargs["params"]
+    assert by_id_params["track_id"] == "12"
+    assert not any(k.startswith("q_") for k in by_id_params)
+
+
+@pytest.mark.asyncio
+async def test_musixmatch_no_fallback_requests_for_honeypot_or_failed_request(sample_track):
+    provider = MusixmatchProvider(config=ProviderConfig(api_key="tok"))
+    poisoned = _mxm_macro(track=QUEEN, subtitles={"subtitle_body": "[00:01.00]Wob gopini den tefe woxica fero"})
+    with patch.object(provider, "request_with_retry", side_effect=[_mxm_resp(poisoned)]) as mock_req:
+        assert await provider.get_lyrics(sample_track) is None
+    assert mock_req.call_count == 1
+
+    with patch.object(provider, "request_with_retry", side_effect=[None]) as mock_req:
+        assert await provider.get_lyrics(sample_track) is None
+    assert mock_req.call_count == 1
+
+
+def test_musixmatch_strips_commercial_use_footer():
+    from src.providers.musixmatch import strip_musixmatch_footer
+
+    body = "Is this the real life?\nIs this just fantasy?\n...\n\n******* This Lyrics is NOT for Commercial use *******\n(1409623035742)"
+    assert strip_musixmatch_footer(body) == "Is this the real life?\nIs this just fantasy?\n..."
+    assert strip_musixmatch_footer("Plain lyrics") == "Plain lyrics"
