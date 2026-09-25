@@ -3,7 +3,7 @@
 from pathlib import Path
 import pytest
 from src.config import AppConfig
-from src.cache import clear_spotify_id_mem_cache, set_active_cache_db_path
+from src.cache import clear_spotify_id_mem_cache, close_cache_connections, set_active_cache_db_path
 
 
 @pytest.fixture(autouse=True)
@@ -23,4 +23,5 @@ def isolate_test_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(AppConfig, "__init__", patched_init)
     yield
     clear_spotify_id_mem_cache()
+    close_cache_connections()  # pooled SQLite connections must not outlive the test's tmp dir
 

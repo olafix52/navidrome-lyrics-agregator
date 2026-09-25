@@ -210,6 +210,8 @@ To scan large music collections at maximum speed:
 - **Fast Line-Sync Mode (`--fast-line-sync`):** Stops the provider cascade immediately once line-synced LRC is found, skipping remaining word-sync queries.
 - **Word-Sync Provider Budget (`--word-sync-budget N`):** Limits how many word-sync providers are queried before accepting line-sync lyrics (e.g. `--word-sync-budget 3`).
 - **Increase concurrency (`--concurrency`):** Set `--concurrency 16` or `32` to process tracks in parallel.
+- **Parallel provider cascade (`--cascade-concurrency N`, default `2`):** Queries the next provider(s) of the cascade while waiting for the current one; results are still taken in priority order. Use `1` for strictly sequential lookups.
+- **Incremental rescans (automatic):** Unchanged files whose last outcome is still valid (no lyrics found, TTL not expired) are skipped on rescans with a single `stat`, without re-reading their tags.
 - **Skip tracks with existing lyrics (`NLA_UPGRADE_QUALITY=false`):** By default, the aggregator searches for word-sync TTML even if an `.lrc` exists. Disable `upgrade_quality` to only fetch lyrics for completely missing songs:
   ```bash
   NLA_UPGRADE_QUALITY=false python -m src.main scan -d /path/to/music --concurrency 24

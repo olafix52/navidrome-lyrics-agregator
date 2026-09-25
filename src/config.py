@@ -146,6 +146,16 @@ class AppConfig(BaseModel):
         default=None,
         description="Maximum additional word-sync providers to query after a verified line-sync match is found (None for unlimited)",
     )
+    cascade_concurrency: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description=(
+            "How many providers of the cascade are queried at the same time. Results are still "
+            "evaluated in priority order; 1 = strictly sequential (fewest requests), 2+ = lower "
+            "latency at the cost of occasional speculative requests"
+        ),
+    )
     cache: CacheConfig = Field(
         default_factory=CacheConfig,
         description="Persistent caching settings for negative lookups",
@@ -269,6 +279,7 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "NLA_DRY_RUN": ("dry_run", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_ALLOW_PLAIN_LYRICS": ("allow_plain_lyrics", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_CONCURRENCY": ("concurrency", int),
+        "NLA_CASCADE_CONCURRENCY": ("cascade_concurrency", int),
         "NLA_NETWORK_TIMEOUT": ("network_timeout", float),
         "NLA_MAX_RETRIES": ("max_retries", int),
         "NLA_LOG_LEVEL": "log_level",

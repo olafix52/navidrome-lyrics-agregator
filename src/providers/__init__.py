@@ -12,6 +12,7 @@ from src.providers.blends import (
     AppleNetEaseKugouBlendProvider,
     AppleNetEaseQQBlendProvider,
     AppleQQBlendProvider,
+    _BaseBlendProvider,
 )
 from src.providers.genius import GeniusProvider
 from src.providers.kugou import KugouProvider
@@ -186,27 +187,54 @@ PROVIDER_METADATA: Dict[str, Dict[str, Any]] = {
 
 def build_provider_cascade(config: AppConfig) -> List[BaseLyricsProvider]:
     """Instantiate and return the configured cascade list of providers."""
+    registry = ProviderRegistry(config)
     providers: List[BaseLyricsProvider] = []
 
     for name in config.enabled_providers:
         name_lower = name.lower().strip()
-        provider_cls = AVAILABLE_PROVIDERS.get(name_lower)
-        if not provider_cls:
+        if name_lower not in AVAILABLE_PROVIDERS:
             continue
 
         prov_config = config.providers.get(name_lower)
         if prov_config and not prov_config.enabled:
             continue
 
-        instance = provider_cls(
-            config=prov_config,
-            user_agent=config.user_agent,
-            default_timeout=config.network_timeout,
-            max_retries=config.max_retries,
-        )
-        providers.append(instance)
+        providers.append(registry.get(name_lower))
 
     return providers
+
+
+class ProviderRegistry:
+    """Creates at most one instance per provider id.
+
+    Blend providers obtain their Apple Music / Spicy Lyrics / LRCLIB / NetEase / QQ / Kugou
+    donors from here, so they share connection pools and rate limiters with the standalone
+    cascade entries (instead of 5 blends each hammering the same API with their own limiter)
+    and use the user's provider settings. Donors that are not enabled as standalone cascade
+    entries are still created on demand.
+    """
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self._instances: Dict[str, BaseLyricsProvider] = {}
+
+    def get(self, name: str) -> BaseLyricsProvider:
+        instance = self._instances.get(name)
+        if instance is not None:
+            return instance
+
+        provider_cls = AVAILABLE_PROVIDERS[name]
+        kwargs: Dict[str, Any] = dict(
+            config=self.config.providers.get(name),
+            user_agent=self.config.user_agent,
+            default_timeout=self.config.network_timeout,
+            max_retries=self.config.max_retries,
+        )
+        if issubclass(provider_cls, _BaseBlendProvider):
+            kwargs["shared_provider"] = self.get
+        instance = provider_cls(**kwargs)
+        self._instances[name] = instance
+        return instance
 
 
 __all__ = [

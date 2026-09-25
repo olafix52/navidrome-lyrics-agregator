@@ -3,9 +3,12 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+import contextvars
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 import httpx
 
 from src.config import ProviderConfig
@@ -18,6 +21,61 @@ logger = logging.getLogger("nla.providers")
 RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 # Longest server-requested 429 back-off we are willing to wait inside a request
 MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+class FetchScope:
+    """Per-track memo of provider lookups.
+
+    While a scope is active (see :meth:`activate`), every ``provider.fetch(track)`` for the
+    same provider instance shares one underlying request. The cascade, the blend providers
+    (which reuse Apple Music / Spicy Lyrics / LRCLIB / NetEase / QQ / Kugou as donors) and
+    speculative parallel lookups therefore never hit the same service twice for one track.
+
+    The scope must only be used for a single track. Lookups still running when the scope
+    ends (e.g. speculative requests made obsolete by an earlier word-sync hit) are cancelled.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: Dict[int, "asyncio.Task[Optional[LyricsResult]]"] = {}
+
+    def task_for(self, provider: "BaseLyricsProvider", track: TrackMetadata) -> "asyncio.Task[Optional[LyricsResult]]":
+        key = id(provider)
+        task = self._tasks.get(key)
+        if task is None:
+            # The task inherits the current context, so nested fetches (blend donors) share this scope
+            task = asyncio.ensure_future(provider.get_lyrics(track))
+            self._tasks[key] = task
+        return task
+
+    def close(self) -> None:
+        for task in self._tasks.values():
+            if not task.done():
+                task.cancel()
+            elif not task.cancelled():
+                task.exception()  # mark retrieved: avoids "exception was never retrieved" noise
+        self._tasks.clear()
+
+    def new_context(self) -> contextvars.Context:
+        """A copy of the current context with this scope active, for ``create_task(..., context=)``.
+
+        Useful where :meth:`activate` cannot wrap the work (e.g. inside async generators).
+        The caller is responsible for calling :meth:`close` afterwards.
+        """
+        ctx = contextvars.copy_context()
+        ctx.run(_FETCH_SCOPE.set, self)
+        return ctx
+
+    @contextmanager
+    def activate(self) -> Iterator["FetchScope"]:
+        token = _FETCH_SCOPE.set(self)
+        try:
+            yield self
+        finally:
+            _FETCH_SCOPE.reset(token)
+            self.close()
+
+
+_FETCH_SCOPE: ContextVar[Optional[FetchScope]] = ContextVar("nla_fetch_scope", default=None)
 
 
 def _backoff_seconds(attempt: int) -> float:
@@ -85,6 +143,19 @@ class BaseLyricsProvider(ABC):
                 limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
             )
         return self._client
+
+    async def fetch(self, track: TrackMetadata) -> Optional[LyricsResult]:
+        """Get lyrics through the active :class:`FetchScope` (if any), deduplicating lookups.
+
+        Callers (cascade, blends, manual search) should use this instead of ``get_lyrics``.
+        Each caller receives its own shallow copy, so mutating a result (e.g. ``match_score``)
+        cannot leak into another consumer.
+        """
+        scope = _FETCH_SCOPE.get()
+        if scope is None:
+            return await self.get_lyrics(track)
+        result = await asyncio.shield(scope.task_for(self, track))
+        return result.model_copy() if result is not None else None
 
     async def close(self) -> None:
         """Close HTTP client session."""

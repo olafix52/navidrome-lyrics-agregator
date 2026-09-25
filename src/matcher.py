@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Tuple, TypeVar
+from collections import deque
+from typing import Any, AsyncGenerator, Callable, Coroutine, Deque, Dict, List, Optional, Tuple, TypeVar
 from src.cache import UPGRADE_SCOPE, LyricsCache, aget_cached_spotify_id
 from src.config import AppConfig
 from src.models import (
@@ -14,7 +15,7 @@ from src.models import (
     TrackMetadata,
 )
 from src.normalizer import verify_track_match
-from src.providers.base import BaseLyricsProvider
+from src.providers.base import BaseLyricsProvider, FetchScope
 from src.storage import (
     get_existing_lyrics_rank,
     lyrics_quality_rank,
@@ -26,6 +27,12 @@ from src.tag_writer import has_embedded_lyrics
 logger = logging.getLogger("nla.matcher")
 
 T = TypeVar("T")
+
+
+def _provider_fetch(provider: Any, track: TrackMetadata) -> Coroutine[Any, Any, Any]:
+    """``provider.fetch`` (scope-deduplicated) with a fallback for duck-typed providers."""
+    fetch = getattr(provider, "fetch", None)
+    return fetch(track) if fetch is not None else provider.get_lyrics(track)
 
 
 class SingleFlight:
@@ -95,13 +102,16 @@ class LyricsMatcher:
 
     async def _fetch_best_lyrics(
         self, track: TrackMetadata, cache_scope: Optional[str] = None
-    ) -> Tuple[Optional[Tuple[Any, str, float]], List[str], bool, Tuple[float, int]]:
-        """Fetch best lyrics from providers cascade without performing disk I/O."""
+    ) -> Tuple[Optional[Tuple[Any, str, float]], List[str], bool, Any]:
+        """Fetch best lyrics from providers cascade without performing disk I/O.
+
+        Returns ``(best_match, providers_queried, is_negative_hit, negative_hit)``.
+        """
         ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
         if self.cache and not ignore_cache:
             hit = await self.cache.is_negative_hit(track, scope=cache_scope)
             if hit:
-                return None, [], True, (hit.remaining_days, hit.failure_count)
+                return None, [], True, hit
 
         logger.info(f"[SEARCHING] {track.display_name()} ({track.duration:.1f}s)")
 
@@ -119,74 +129,122 @@ class LyricsMatcher:
         remaining_word_sync_budget = getattr(self.config, "word_sync_search_budget", None)
         early_exit = getattr(self.config, "early_exit_on_line_sync", False)
         providers_queried: List[str] = []
+        window = max(1, int(getattr(self.config, "cascade_concurrency", 1) or 1))
 
+        # Skip plain-only providers if allow_plain_lyrics is False
+        candidates: List[BaseLyricsProvider] = []
         for provider in self.providers:
-            # Skip plain-only providers if allow_plain_lyrics is False
-            if not self.config.allow_plain_lyrics and not getattr(provider, "supports_line_sync", True) and not getattr(provider, "supports_word_sync", True):
+            if (
+                not self.config.allow_plain_lyrics
+                and not getattr(provider, "supports_line_sync", True)
+                and not getattr(provider, "supports_word_sync", True)
+            ):
                 logger.debug(f"[{provider.name}] Skipping: plain lyrics disabled (allow_plain_lyrics=False)")
                 continue
+            candidates.append(provider)
 
-            # If we already matched LINE_SYNC, optimize the remaining cascade
-            if best_match and best_match[0].sync_type == LyricsSyncType.LINE_SYNC:
-                if early_exit:
-                    logger.debug(f"[CASCADE] Early exit on line-sync active, ending cascade before {provider.name}")
-                    break
+        def has_line_sync() -> bool:
+            return bool(best_match) and best_match[0].sync_type == LyricsSyncType.LINE_SYNC
 
-                if not getattr(provider, "supports_word_sync", True):
+        # Up to ``window`` providers run concurrently, but results are consumed strictly in
+        # cascade order, so the chosen lyrics are identical to a sequential cascade; only the
+        # waiting overlaps. With window=1 this is exactly the sequential cascade.
+        inflight: Deque[Tuple[BaseLyricsProvider, "asyncio.Task[Any]"]] = deque()
+        next_idx = 0
+
+        def launch() -> None:
+            nonlocal next_idx
+            while len(inflight) < window and next_idx < len(candidates):
+                if has_line_sync() and (early_exit or remaining_word_sync_budget == 0):
+                    return  # nothing more will be consumed
+                provider = candidates[next_idx]
+                next_idx += 1
+                if has_line_sync() and not getattr(provider, "supports_word_sync", True):
                     logger.debug(f"[{provider.name}] Skipping: cannot produce word-sync and line-sync already matched")
                     continue
-
-                if remaining_word_sync_budget is not None:
-                    if remaining_word_sync_budget <= 0:
-                        logger.debug(f"[CASCADE] Word-sync search budget reached, ending cascade before {provider.name}")
-                        break
-                    remaining_word_sync_budget -= 1
-
-            providers_queried.append(provider.name)
-            try:
                 logger.debug(f"[{provider.name}] Querying for '{track.display_name()}'...")
-                lyrics = await provider.get_lyrics(track)
+                inflight.append((provider, asyncio.create_task(_provider_fetch(provider, track))))
 
-                if not lyrics or not lyrics.content:
-                    continue
+        with FetchScope().activate():
+            try:
+                while True:
+                    launch()
+                    if not inflight:
+                        break
+                    provider, task = inflight.popleft()
 
-                if lyrics.sync_type == LyricsSyncType.UNSYNCED and not self.config.allow_plain_lyrics:
-                    logger.debug(f"[{provider.name}] Plain lyrics ignored (allow_plain_lyrics=False)")
-                    continue
+                    # If we already matched LINE_SYNC, optimize the remaining cascade
+                    if has_line_sync():
+                        if early_exit:
+                            logger.debug(f"[CASCADE] Early exit on line-sync active, ending cascade before {provider.name}")
+                            task.cancel()
+                            break
+                        if not getattr(provider, "supports_word_sync", True):
+                            logger.debug(f"[{provider.name}] Skipping: cannot produce word-sync and line-sync already matched")
+                            task.cancel()
+                            continue
+                        if remaining_word_sync_budget is not None:
+                            if remaining_word_sync_budget <= 0:
+                                logger.debug(f"[CASCADE] Word-sync search budget reached, ending cascade before {provider.name}")
+                                task.cancel()
+                                break
+                            remaining_word_sync_budget -= 1
 
-                is_match, score, reason = verify_track_match(
-                    expected_title=track.clean_title or track.title,
-                    expected_artist=track.clean_artist or track.artist,
-                    found_title=lyrics.title,
-                    found_artist=lyrics.artist,
-                    expected_duration=track.duration,
-                    found_duration=lyrics.duration,
-                    tolerance_seconds=self.config.duration_tolerance_seconds,
-                    min_similarity=self.config.min_similarity_score,
-                )
+                    providers_queried.append(provider.name)
+                    try:
+                        lyrics = await task
+                    except Exception as e:
+                        logger.warning(f"[{provider.name}] Exception while processing {track.display_name()}: {e}")
+                        continue
 
-                if not is_match:
-                    logger.debug(f"[{provider.name}] Match rejected: {reason}")
-                    continue
+                    scored = self._verify_candidate(track, provider.name, lyrics)
+                    if scored is None:
+                        continue
+                    score = scored.match_score
 
-                lyrics.match_score = score
+                    if scored.sync_type == LyricsSyncType.WORD_SYNC:
+                        best_match = (scored, provider.name, score)
+                        break
 
-                if lyrics.sync_type == LyricsSyncType.WORD_SYNC:
-                    best_match = (lyrics, provider.name, score)
-                    break
+                    if scored.sync_type == LyricsSyncType.LINE_SYNC:
+                        if not best_match or best_match[0].sync_type == LyricsSyncType.UNSYNCED:
+                            best_match = (scored, provider.name, score)
+                        continue
 
-                if lyrics.sync_type == LyricsSyncType.LINE_SYNC:
-                    if not best_match or best_match[0].sync_type == LyricsSyncType.UNSYNCED:
-                        best_match = (lyrics, provider.name, score)
-                    continue
+                    if not best_match:
+                        best_match = (scored, provider.name, score)
+            finally:
+                # Speculative lookups made obsolete by an earlier hit
+                for _, pending in inflight:
+                    pending.cancel()
 
-                if not best_match:
-                    best_match = (lyrics, provider.name, score)
+        return best_match, providers_queried, False, None
 
-            except Exception as e:
-                logger.warning(f"[{provider.name}] Exception while processing {track.display_name()}: {e}")
+    def _verify_candidate(self, track: TrackMetadata, provider_name: str, lyrics: Any) -> Optional[Any]:
+        """Return the lyrics with ``match_score`` set if they are acceptable for ``track``."""
+        if not lyrics or not lyrics.content:
+            return None
 
-        return best_match, providers_queried, False, (0.0, 0)
+        if lyrics.sync_type == LyricsSyncType.UNSYNCED and not self.config.allow_plain_lyrics:
+            logger.debug(f"[{provider_name}] Plain lyrics ignored (allow_plain_lyrics=False)")
+            return None
+
+        is_match, score, reason = verify_track_match(
+            expected_title=track.clean_title or track.title,
+            expected_artist=track.clean_artist or track.artist,
+            found_title=lyrics.title,
+            found_artist=lyrics.artist,
+            expected_duration=track.duration,
+            found_duration=lyrics.duration,
+            tolerance_seconds=self.config.duration_tolerance_seconds,
+            min_similarity=self.config.min_similarity_score,
+        )
+        if not is_match:
+            logger.debug(f"[{provider_name}] Match rejected: {reason}")
+            return None
+
+        lyrics.match_score = score
+        return lyrics
 
     async def process_track(self, track: TrackMetadata) -> ProcessResult:
         """Process a single audio track: check existing sidecar, query providers, verify, and save."""
@@ -225,13 +283,13 @@ class LyricsMatcher:
             f"{int(round(track.duration or 0))}"
         )
 
-        best_match, providers_queried, is_negative_hit, neg_hit_info = await self._single_flight.execute(
+        best_match, providers_queried, is_negative_hit, neg_hit = await self._single_flight.execute(
             flight_key,
             lambda: self._fetch_best_lyrics(track, cache_scope=cache_scope),
         )
 
         if is_negative_hit:
-            remaining_days, failure_count = neg_hit_info
+            remaining_days, failure_count = neg_hit.remaining_days, neg_hit.failure_count
             what = "no better lyrics than existing sidecar" if cache_scope else "no lyrics"
             logger.debug(
                 f"[CACHE HIT - NEGATIVE] {track.display_name()} - skipped ({what} found on previous scan, "
@@ -241,6 +299,8 @@ class LyricsMatcher:
                 file_path=track.file_path,
                 status=MatchStatus.SKIPPED,
                 error_message=f"Negative cache: {what} found across providers ({remaining_days:.1f}d remaining)",
+                recheck_after=time.time() + neg_hit.remaining_seconds,
+                negative_key=neg_hit.cache_key,
             )
 
         ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
@@ -258,14 +318,18 @@ class LyricsMatcher:
                         f"[NO UPGRADE] {track.display_name()} - best result ({lyrics.format.value.upper()}, "
                         f"{lyrics.sync_type.value} via {provider_name}) is not better than the existing sidecar"
                     )
+                    recheck: Tuple[Optional[float], Optional[str]] = (None, None)
                     if write_cache and not ignore_cache and providers_queried:
                         await self.cache.record_negative(
                             track, providers_checked=providers_queried, scope=UPGRADE_SCOPE
                         )
+                        recheck = self._negative_recheck(track, UPGRADE_SCOPE)
                     return ProcessResult(
                         file_path=track.file_path,
                         status=MatchStatus.SKIPPED,
                         error_message="No higher-quality lyrics found than the existing sidecar",
+                        recheck_after=recheck[0],
+                        negative_key=recheck[1],
                     )
                 # 'both' mode with missing tags: keep the existing (better or equal) sidecar,
                 # only populate the audio tags.
@@ -311,14 +375,22 @@ class LyricsMatcher:
             )
 
         # Record in negative cache so subsequent scans skip this track immediately
+        recheck: Tuple[Optional[float], Optional[str]] = (None, None)
         if write_cache and not ignore_cache and providers_queried:
             await self.cache.record_negative(track, providers_checked=providers_queried, scope=cache_scope)
+            recheck = self._negative_recheck(track, cache_scope)
 
         logger.info(f"[NOT FOUND] No matching lyrics found for {track.display_name()}")
         return ProcessResult(
             file_path=track.file_path,
             status=MatchStatus.NOT_FOUND,
+            recheck_after=recheck[0],
+            negative_key=recheck[1],
         )
+
+    def _negative_recheck(self, track: TrackMetadata, scope: Optional[str]) -> Tuple[float, str]:
+        """(recheck_after, cache_key) of a negative entry just recorded for ``track``."""
+        return time.time() + self.cache.ttl_days * 86400.0, self.cache.get_cache_key(track, scope=scope)
 
     def _existing_lyrics_state(
         self, track: TrackMetadata, storage_mode: str
@@ -363,7 +435,7 @@ class LyricsMatcher:
             try:
                 # Per-provider timeout prevents hanging on slow/rate-limited remote services
                 lyrics = await asyncio.wait_for(
-                    provider.get_lyrics(track),
+                    _provider_fetch(provider, track),
                     timeout=timeout_per_provider,
                 )
                 if not lyrics or not lyrics.content:
@@ -401,8 +473,11 @@ class LyricsMatcher:
                 logger.debug(f"[{provider.name}] Error during manual provider search: {e}")
                 return None
 
-        # Execute concurrently and stream as each completes
-        tasks = [asyncio.create_task(_query(p)) for p in self.providers]
+        # Execute concurrently and stream as each completes. All queries share one FetchScope,
+        # so blends reuse the standalone providers' responses instead of re-requesting them.
+        scope = FetchScope()
+        ctx = scope.new_context()
+        tasks = [asyncio.create_task(_query(p), context=ctx) for p in self.providers]
         try:
             for fut in asyncio.as_completed(tasks):
                 res = await fut
@@ -413,6 +488,7 @@ class LyricsMatcher:
             for t in tasks:
                 if not t.done():
                     t.cancel()
+            scope.close()
 
         # Cache results if any found
         if collected:
@@ -460,9 +536,11 @@ class LyricsMatcher:
         return candidates
 
     async def close(self) -> None:
-        """Clean up all provider connections."""
+        """Clean up all provider connections and pooled database connections."""
         for provider in self.providers:
             try:
                 await provider.close()
             except Exception:
                 pass
+        if self.cache is not None:
+            self.cache.close()

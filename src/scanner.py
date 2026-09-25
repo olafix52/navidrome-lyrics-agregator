@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 
+from src.cache import RECHECK_NEVER, FileState
 from src.config import AppConfig
 from src.logger import console
 from src.matcher import LyricsMatcher
@@ -26,6 +28,87 @@ class LibraryScanner:
     def __init__(self, config: AppConfig, matcher: LyricsMatcher):
         self.config = config
         self.matcher = matcher
+        # Incremental rescans: files whose last outcome is still valid (negative cache entry
+        # not expired / embedded tags present) and that did not change are skipped without
+        # parsing their tags. Loaded once per scan, written back in batches.
+        self._file_states: Dict[str, FileState] = {}
+        self._pending_states: List[tuple] = []
+
+    # ------------------------------------------------------------------
+    # Incremental rescan state
+    # ------------------------------------------------------------------
+
+    def _state_context(self) -> str:
+        """Settings a recorded outcome depends on; a change invalidates all file states."""
+        cfg = self.config
+        return f"{str(cfg.storage_mode).lower()}|{cfg.output_dir or ''}|{cfg.upgrade_quality}|{cfg.allow_plain_lyrics}"
+
+    def _file_states_enabled(self) -> bool:
+        cfg = self.config
+        return self.matcher.cache is not None and not (cfg.overwrite or cfg.ignore_cache)
+
+    async def _load_file_states(self) -> None:
+        self._file_states = {}
+        self._pending_states = []
+        if not self._file_states_enabled():
+            return
+        try:
+            self._file_states = await self.matcher.cache.load_file_states()
+            logger.debug(f"Loaded {len(self._file_states)} unchanged-file states for incremental scan")
+        except Exception as e:
+            logger.warning(f"Could not load file states, scanning everything: {e}")
+
+    async def _flush_file_states(self) -> None:
+        rows, self._pending_states = self._pending_states, []
+        if not rows or self.matcher.cache is None:
+            return
+        try:
+            await self.matcher.cache.save_file_states(rows)
+        except Exception as e:
+            logger.warning(f"Could not save file states: {e}")
+
+    async def _remember_outcome(self, file_path: Path, recheck_after: float, negative_key: Optional[str]) -> None:
+        if self.config.dry_run or not self._file_states_enabled():
+            return
+        try:
+            st = file_path.stat()
+        except OSError:
+            return
+        self._pending_states.append(
+            (str(file_path), st.st_mtime_ns, st.st_size, self._state_context(), recheck_after, negative_key)
+        )
+        if len(self._pending_states) >= 256:
+            await self._flush_file_states()
+
+    def _precheck_sync(self, file_path: Path) -> tuple:
+        """(skip, reason, remember_embedded) using only a stat when the file is known unchanged."""
+        state = self._file_states.get(str(file_path))
+        if state is not None:
+            try:
+                st = file_path.stat()
+            except OSError:
+                st = None
+            if (
+                st is not None
+                and state.mtime_ns == st.st_mtime_ns
+                and state.size == st.st_size
+                and state.context == self._state_context()
+                and state.recheck_after > time.time()
+            ):
+                return True, "Unchanged since last scan (outcome still valid)", False
+
+        skip, reason = should_skip_track(
+            file_path,
+            overwrite=self.config.overwrite,
+            upgrade_quality=self.config.upgrade_quality,
+            storage_mode=self.config.storage_mode,
+            output_dir=self.config.output_dir,
+            music_dir=self.config.music_dir,
+        )
+        # Embedded-only mode needs a tag parse to know lyrics exist: remember it until the
+        # file changes. (Sidecar checks are a cached directory listing and need no state.)
+        remember = skip and str(self.config.storage_mode).lower() == "embedded"
+        return skip, reason, remember
 
     def discover_audio_files(self, root_dir: Path) -> List[Path]:
         """Find all supported audio files in the target directory recursively using fast os.scandir."""
@@ -42,6 +125,7 @@ class LibraryScanner:
         total = len(items)
         if total == 0:
             return []
+        await self._load_file_states()
 
         queue: asyncio.Queue[Any] = asyncio.Queue()
         for item in items:
@@ -92,6 +176,7 @@ class LibraryScanner:
         else:
             workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
             await asyncio.gather(*workers)
+        await self._flush_file_states()
 
         self.display_summary(results)
 
@@ -219,6 +304,7 @@ class LibraryScanner:
         Uses a producer-consumer architecture so files are processed concurrently
         as soon as they are found on disk, avoiding massive list allocations.
         """
+        await self._load_file_states()
         worker_count = max(1, self.config.concurrency)
         queue: asyncio.Queue[Optional[Path]] = asyncio.Queue(maxsize=min(500, max(50, worker_count * 10)))
         results: List[ProcessResult] = []
@@ -302,6 +388,7 @@ class LibraryScanner:
                 await asyncio.gather(producer_task, *worker_tasks)
         finally:
             stop_event.set()
+            await self._flush_file_states()
 
         self.display_summary(results)
 
@@ -330,17 +417,11 @@ class LibraryScanner:
         """Read metadata and invoke lyrics matcher on a single file."""
         # Cheap pre-check first: tracks that already have lyrics are skipped without
         # parsing their audio tags (sidecar mode needs only a cached directory listing).
-        skip, skip_reason = await asyncio.to_thread(
-            should_skip_track,
-            file_path,
-            overwrite=self.config.overwrite,
-            upgrade_quality=self.config.upgrade_quality,
-            storage_mode=self.config.storage_mode,
-            output_dir=self.config.output_dir,
-            music_dir=self.config.music_dir,
-        )
+        skip, skip_reason, remember = await asyncio.to_thread(self._precheck_sync, file_path)
         if skip:
             logger.debug(f"[SKIPPED] {file_path.name} - {skip_reason}")
+            if remember:
+                await self._remember_outcome(file_path, RECHECK_NEVER, None)
             return ProcessResult(
                 file_path=file_path,
                 status=MatchStatus.SKIPPED,
@@ -355,7 +436,10 @@ class LibraryScanner:
                 error_message="Could not read metadata tags",
             )
 
-        return await self.matcher.process_track(metadata)
+        result = await self.matcher.process_track(metadata)
+        if result.recheck_after is not None:
+            await self._remember_outcome(file_path, result.recheck_after, result.negative_key)
+        return result
 
     def display_summary(self, results: List[ProcessResult]) -> None:
         """Display a structured Rich summary table of scan results."""

@@ -37,6 +37,9 @@ allow_plain_lyrics: false
 
 # Concurrency and network settings
 concurrency: 4
+# Providers queried at the same time for one track (results still used in cascade priority
+# order). 1 = strictly sequential; 2+ = faster, occasionally one speculative request more.
+cascade_concurrency: 2
 network_timeout: 10.0
 max_retries: 3
 

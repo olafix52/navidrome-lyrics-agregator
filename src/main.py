@@ -61,6 +61,8 @@ def apply_processing_overrides(args: argparse.Namespace, config: AppConfig) -> N
         config.early_exit_on_line_sync = True
     if getattr(args, "word_sync_budget", None) is not None:
         config.word_sync_search_budget = args.word_sync_budget
+    if getattr(args, "cascade_concurrency", None) is not None:
+        config.cascade_concurrency = args.cascade_concurrency
 
 
 async def run_scan_command(args: argparse.Namespace, config) -> None:
@@ -234,26 +236,34 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
 
 async def _query_each_provider(providers, metadata: TrackMetadata) -> None:
     """Query every provider for ``metadata`` and print a preview of each hit (test-track)."""
-    for provider in providers:
-        console.print(f"[bold yellow]Querying provider '{provider.name}'...[/bold yellow]")
-        try:
-            res = await provider.get_lyrics(metadata)
-            if res:
-                console.print(
-                    f"  [bold green]HIT![/bold green] Format: [magenta]{res.format.value.upper()}[/magenta] "
-                    f"| Sync: [cyan]{res.sync_type.value}[/cyan] | Title: {res.title} | Artist: {res.artist}"
-                )
-                console.print("--- Content Preview (first 10 lines) ---")
-                lines = res.content.splitlines()[:10]
-                for line in lines:
-                    console.print(f"  {line}")
-                if len(res.content.splitlines()) > 10:
-                    console.print(f"  ... (+{len(res.content.splitlines()) - 10} more lines)")
-                console.print("----------------------------------------\n")
-            else:
-                console.print("  [dim]No lyrics found on this provider[/dim]\n")
-        except Exception as e:
-            console.print(f"  [bold red]Error querying {provider.name}:[/bold red] {e}\n")
+    from src.providers.base import FetchScope
+
+    with FetchScope().activate():  # blends reuse the standalone providers' responses
+        for provider in providers:
+            await _query_provider(provider, metadata)
+
+
+async def _query_provider(provider, metadata: TrackMetadata) -> None:
+    """Query one provider and print a preview of its result."""
+    console.print(f"[bold yellow]Querying provider '{provider.name}'...[/bold yellow]")
+    try:
+        res = await provider.fetch(metadata)
+        if res:
+            console.print(
+                f"  [bold green]HIT![/bold green] Format: [magenta]{res.format.value.upper()}[/magenta] "
+                f"| Sync: [cyan]{res.sync_type.value}[/cyan] | Title: {res.title} | Artist: {res.artist}"
+            )
+            console.print("--- Content Preview (first 10 lines) ---")
+            lines = res.content.splitlines()[:10]
+            for line in lines:
+                console.print(f"  {line}")
+            if len(res.content.splitlines()) > 10:
+                console.print(f"  ... (+{len(res.content.splitlines()) - 10} more lines)")
+            console.print("----------------------------------------\n")
+        else:
+            console.print("  [dim]No lyrics found on this provider[/dim]\n")
+    except Exception as e:
+        console.print(f"  [bold red]Error querying {provider.name}:[/bold red] {e}\n")
 
 
 async def run_cache_command(args: argparse.Namespace, config) -> None:
@@ -287,6 +297,7 @@ async def run_cache_command(args: argparse.Namespace, config) -> None:
     table.add_row("Active Entries (within TTL)", str(stats["active_negative_entries"]))
     table.add_row("Expired Entries", str(stats["expired_negative_entries"]))
     table.add_row("Cached Spotify IDs", str(stats.get("total_spotify_ids", 0)))
+    table.add_row("Unchanged Files Skipped on Rescan", str(stats.get("tracked_unchanged_files", 0)))
 
     console.print(table)
 
@@ -405,7 +416,7 @@ async def run_web_command(args: argparse.Namespace, config) -> None:
 
     # Without a token, a loopback-only server must also reject foreign Host headers (DNS rebinding)
     trusted_hosts = LOOPBACK_HOSTS if (loopback and not config.web_auth_token) else None
-    app = create_app(config, trusted_hosts=trusted_hosts)
+    app = create_app(config, trusted_hosts=trusted_hosts, watch_library=True)
 
     console.print(f"[bold green]Starting Web UI & Karaoke Dashboard at:[/bold green] http://{host}:{port}")
     if config.web_auth_token:
@@ -624,6 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
     scan_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
     scan_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
+    scan_p.add_argument("--cascade-concurrency", type=int, choices=range(1, 9), metavar="N", default=None, help="Providers queried at the same time (1 = sequential; default from config: 2)")
 
     # DAEMON subcommand
     daemon_p = subparsers.add_parser("daemon", parents=[provider_parent, cache_parent], help="Run in daemon mode with periodic scans")
@@ -639,6 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after downloading new lyrics")
     daemon_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
     daemon_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
+    daemon_p.add_argument("--cascade-concurrency", type=int, choices=range(1, 9), metavar="N", default=None, help="Providers queried at the same time (1 = sequential; default from config: 2)")
 
     # WATCH subcommand
     watch_p = subparsers.add_parser("watch", parents=[provider_parent, cache_parent], help="Watch music directory and fetch lyrics on file events")
@@ -647,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
     watch_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
     watch_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
+    watch_p.add_argument("--cascade-concurrency", type=int, choices=range(1, 9), metavar="N", default=None, help="Providers queried at the same time (1 = sequential; default from config: 2)")
 
     # TEST-TRACK subcommand
     test_p = subparsers.add_parser("test-track", parents=[provider_parent], help="Test query against all providers for a single track")
@@ -688,6 +702,7 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_p.add_argument("--output-dir", type=str, help="Custom output directory for saved sidecars")
     upgrade_p.add_argument("--auto-scan", action="store_true", help="Auto-trigger Navidrome scan after upgrading lyrics")
     upgrade_p.add_argument("--word-sync-budget", type=int, default=None, help="Maximum additional word-sync providers to check after line-sync is found")
+    upgrade_p.add_argument("--cascade-concurrency", type=int, choices=range(1, 9), metavar="N", default=None, help="Providers queried at the same time (1 = sequential; default from config: 2)")
 
     # CACHE subcommand
     cache_p = subparsers.add_parser("cache", parents=[cache_parent], help="Manage SQLite persistent negative lyrics cache")

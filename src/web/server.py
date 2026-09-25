@@ -4,9 +4,7 @@ import base64
 import hmac
 import json
 import logging
-import threading
-import time
-from functools import lru_cache
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -17,14 +15,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from src.audit import LibraryAuditor
 from src.config import AppConfig
 from src.matcher import LyricsMatcher
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
 from src.storage import get_existing_lyrics_file, save_lyrics_for_track
-from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, read_track_metadata
+from src.tag_reader import is_supported_audio_file
+from src.web.library_index import LibraryIndex, cached_track_tags
 from src.web.parser import karaoke_to_ttml, parse_lyrics_to_karaoke
 
 logger = logging.getLogger("nla.web")
@@ -69,54 +67,6 @@ def _token_matches(provided: Optional[str], expected: str) -> bool:
     return bool(provided) and hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
-# How long a library walk / audit is reused before the disk is scanned again
-LIBRARY_CACHE_TTL_SECONDS = 15.0
-
-
-class _TTLValue:
-    """Thread-safe single-value cache with expiry (library listing, audit report)."""
-
-    def __init__(self, ttl: float):
-        self.ttl = ttl
-        self._lock = threading.Lock()
-        self._key: Any = None
-        self._value: Any = None
-        self._ts = 0.0
-
-    def get(self, key: Any, compute):
-        with self._lock:
-            if self._key == key and time.monotonic() - self._ts < self.ttl:
-                return self._value
-        value = compute()
-        with self._lock:
-            self._key, self._value, self._ts = key, value, time.monotonic()
-        return value
-
-    def invalidate(self) -> None:
-        with self._lock:
-            self._key = None
-
-
-@lru_cache(maxsize=20000)
-def _cached_sync_type(lyrics_path: str, mtime_ns: int, size: int, fmt: LyricsFormat) -> str:
-    """Sync type of a lyrics file, memoized by (path, mtime, size) so unchanged files are read once."""
-    from src.models import detect_sync_type
-
-    try:
-        content = Path(lyrics_path).read_text(encoding="utf-8", errors="replace")[:4096]
-        return detect_sync_type(content, fmt).value
-    except OSError:
-        return "unsynced"
-
-
-def _sync_type_for(lyrics_path: Path, fmt: LyricsFormat) -> str:
-    try:
-        st = lyrics_path.stat()
-    except OSError:
-        return "unsynced"
-    return _cached_sync_type(str(lyrics_path), st.st_mtime_ns, st.st_size, fmt)
-
-
 def encode_track_id(audio_path: Path, music_dir: Path) -> str:
     """Encode relative path to base64url track ID."""
     rel = audio_path.resolve().relative_to(music_dir.resolve())
@@ -153,6 +103,7 @@ def create_app(
     config: AppConfig,
     matcher: Optional[LyricsMatcher] = None,
     trusted_hosts: Optional[List[str]] = None,
+    watch_library: bool = False,
 ) -> FastAPI:
     """Create and configure the FastAPI web application.
 
@@ -164,11 +115,28 @@ def create_app(
         obtained by opening ``/?token=<token>`` once).
       - ``trusted_hosts`` restricts accepted Host headers (protects loopback-only servers
         against DNS rebinding).
+
+    ``watch_library`` keeps the library index current through a filesystem watcher while
+    the server runs (started/stopped by the ASGI lifespan); otherwise it refreshes by TTL.
     """
+    library_index = LibraryIndex(lambda: app.state.config, encode_track_id)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if watch_library:
+            library_index.start_watching()
+        try:
+            yield
+        finally:
+            library_index.stop_watching()
+            if app.state.matcher is not None:
+                await app.state.matcher.close()
+
     app = FastAPI(
         title="Navidrome Lyrics Aggregator - Web UI",
         description="Lightweight dashboard for coverage charts, live karaoke player, and provider search",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     @app.middleware("http")
@@ -212,9 +180,7 @@ def create_app(
     # Internal state / lazy matcher
     app.state.config = config
     app.state.matcher = matcher
-    app.state.auditor = LibraryAuditor()
-    library_cache = _TTLValue(LIBRARY_CACHE_TTL_SECONDS)
-    stats_cache = _TTLValue(LIBRARY_CACHE_TTL_SECONDS)
+    app.state.library_index = library_index
 
     def get_or_create_matcher() -> LyricsMatcher:
         if app.state.matcher is None:
@@ -227,27 +193,8 @@ def create_app(
     # threadpool instead of blocking the event loop (and every other request).
     @app.get("/api/stats")
     def get_stats():
-        """Get library coverage and lyrics distribution statistics."""
-        music_dir = Path(app.state.config.music_dir)
-        report = stats_cache.get(
-            str(music_dir),
-            lambda: app.state.auditor.audit_library(music_dir, load_metadata_for_missing=False),
-        )
-        return {
-            "music_dir": str(music_dir),
-            "total_tracks": report.total_tracks,
-            "has_lyrics_count": report.has_lyrics_count,
-            "coverage_pct": round(report.coverage_pct, 1),
-            "word_sync_count": report.word_sync_count,
-            "word_sync_pct": round(report.word_sync_pct, 1),
-            "line_sync_count": report.line_sync_count,
-            "line_sync_pct": round(report.line_sync_pct, 1),
-            "unsynced_count": report.unsynced_count,
-            "unsynced_pct": round(report.unsynced_pct, 1),
-            "missing_count": report.missing_count,
-            "missing_pct": round(report.missing_pct, 1),
-            "format_counts": report.format_counts,
-        }
+        """Get library coverage and lyrics distribution statistics (from the library index)."""
+        return {"music_dir": str(app.state.config.music_dir), **library_index.stats()}
 
     # 2. API TRACKS LISTING
     @app.get("/api/tracks")
@@ -262,75 +209,52 @@ def create_app(
         if not music_dir.exists():
             return {"total": 0, "page": page, "limit": limit, "tracks": []}
 
-        all_audio = library_cache.get(str(music_dir), lambda: fast_discover_audio_files(music_dir))
-        output_dir = app.state.config.output_dir
-
+        query_lower = q.lower() if q else None
         items: List[Dict[str, Any]] = []
-        for p in all_audio:
-            rel_path = str(p.relative_to(music_dir))
-            try:
-                track_id = encode_track_id(p, music_dir)
-            except ValueError:
-                # Symlinked file resolving outside the library: cannot be served safely
+        for t in library_index.tracks():
+            if filter == "missing" and t.has_lyrics:
                 continue
-
-            existing = get_existing_lyrics_file(p, output_dir=output_dir, music_dir=music_dir)
-            has_lyrics = existing is not None
-            fmt_str = existing[1].value if existing else None
-
-            # Detect sync type if lyrics exist (memoized per file version)
-            sync_type_str = _sync_type_for(existing[0], existing[1]) if existing else None
-
-            # Apply filter
-            if filter == "missing" and has_lyrics:
+            if filter == "has_lyrics" and not t.has_lyrics:
                 continue
-            if filter == "has_lyrics" and not has_lyrics:
+            if filter == "word_sync" and t.sync_type != "word_sync":
                 continue
-            if filter == "word_sync" and sync_type_str != "word_sync":
+            if filter == "line_sync" and t.sync_type != "line_sync":
                 continue
-            if filter == "line_sync" and sync_type_str != "line_sync":
+            if query_lower and query_lower not in t.filename.lower() and query_lower not in t.relative_path.lower():
                 continue
-
-            # Apply search query
-            if q:
-                query_lower = q.lower()
-                if query_lower not in p.name.lower() and query_lower not in rel_path.lower():
-                    continue
-
-            items.append({
-                "id": track_id,
-                "filename": p.name,
-                "relative_path": rel_path,
-                "has_lyrics": has_lyrics,
-                "format": fmt_str,
-                "sync_type": sync_type_str,
-            })
+            items.append(t)
 
         total = len(items)
         start_idx = (page - 1) * limit
-        end_idx = start_idx + limit
-        paginated = items[start_idx:end_idx]
+        paginated = items[start_idx:start_idx + limit]
 
-        # Enrich paginated items with tag metadata
-        for it in paginated:
-            decoded_p = decode_track_id(it["id"], music_dir)
-            if decoded_p:
-                meta = read_track_metadata(decoded_p)
-                it["artist"] = meta.artist if meta else ""
-                it["title"] = meta.title if meta else decoded_p.stem
-                it["album"] = meta.album if meta else ""
-                it["duration"] = meta.duration if meta else 0.0
+        # Enrich only the visible page with tag metadata (memoized per file version)
+        tracks: List[Dict[str, Any]] = []
+        for t in paginated:
+            tags = cached_track_tags(t.path)
+            tracks.append({
+                "id": t.track_id,
+                "filename": t.filename,
+                "relative_path": t.relative_path,
+                "has_lyrics": t.has_lyrics,
+                "format": t.format,
+                "sync_type": t.sync_type,
+                "artist": tags["artist"] if tags else "",
+                "title": tags["title"] if tags else t.path.stem,
+                "album": tags["album"] if tags else "",
+                "duration": tags["duration"] if tags else 0.0,
+            })
 
         return {
             "total": total,
             "page": page,
             "limit": limit,
-            "tracks": paginated,
+            "tracks": tracks,
         }
 
     # 3. API AUDIO STREAMING WITH HTTP RANGE SUPPORT
     @app.get("/api/tracks/{track_id}/audio")
-    async def get_audio_stream(track_id: str):
+    def get_audio_stream(track_id: str):
         """Stream audio file with standard HTTP Range support for seeking in HTML5 audio player."""
         music_dir = Path(app.state.config.music_dir)
         audio_path = decode_track_id(track_id, music_dir)
@@ -367,7 +291,7 @@ def create_app(
         if not audio_path or not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found")
 
-        meta = read_track_metadata(audio_path)
+        tags = cached_track_tags(audio_path)
         existing = get_existing_lyrics_file(
             audio_path, output_dir=app.state.config.output_dir, music_dir=music_dir
         )
@@ -380,10 +304,10 @@ def create_app(
                 "content": "",
                 "lines": [],
                 "track": {
-                    "artist": meta.artist if meta else "",
-                    "title": meta.title if meta else audio_path.stem,
-                    "album": meta.album if meta else "",
-                    "duration": meta.duration if meta else 0.0,
+                    "artist": tags["artist"] if tags else "",
+                    "title": tags["title"] if tags else audio_path.stem,
+                    "album": tags["album"] if tags else "",
+                    "duration": tags["duration"] if tags else 0.0,
                 },
                 "ttml_content": "",
             }
@@ -394,8 +318,8 @@ def create_app(
         sync_type = detect_sync_type(content, fmt)
 
         karaoke_lines = parse_lyrics_to_karaoke(content, fmt)
-        track_title = meta.title if meta else audio_path.stem
-        track_artist = meta.artist if meta else ""
+        track_title = tags["title"] if tags else audio_path.stem
+        track_artist = tags["artist"] if tags else ""
 
         if fmt == LyricsFormat.TTML:
             ttml_content = content
@@ -467,8 +391,8 @@ def create_app(
             "track": {
                 "artist": track_artist,
                 "title": track_title,
-                "album": meta.album if meta else "",
-                "duration": meta.duration if meta else 0.0,
+                "album": tags["album"] if tags else "",
+                "duration": tags["duration"] if tags else 0.0,
             },
         }
 
@@ -545,7 +469,7 @@ def create_app(
         if not audio_path or not audio_path.exists():
             raise HTTPException(status_code=404, detail="Audio file not found")
 
-        meta = read_track_metadata(audio_path)
+        tags = cached_track_tags(audio_path)
         try:
             fmt = LyricsFormat(req.format.lower())
         except ValueError:
@@ -558,9 +482,9 @@ def create_app(
             format=fmt,
             sync_type=sync_type,
             content=req.content,
-            title=meta.title if meta else audio_path.stem,
-            artist=meta.artist if meta else "",
-            duration=meta.duration if meta else 0.0,
+            title=tags["title"] if tags else audio_path.stem,
+            artist=tags["artist"] if tags else "",
+            duration=tags["duration"] if tags else 0.0,
             provider_name=req.provider or "manual",
         )
 
@@ -576,7 +500,7 @@ def create_app(
             remove_lower_quality=True,
             enhanced_lrc=cfg.embed_word_sync,
         )
-        stats_cache.invalidate()
+        library_index.mark_dir_dirty(audio_path.parent)
 
         return {
             "success": True,

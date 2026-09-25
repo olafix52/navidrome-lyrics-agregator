@@ -229,7 +229,9 @@ async def test_matcher_skips_non_word_sync_provider_after_line_sync(tmp_path: Pa
         return await orig_p2_get(t)
     p2.get_lyrics = track_p2_get
 
-    config = AppConfig(music_dir=tmp_path, early_exit_on_line_sync=False)
+    # Sequential cascade: with a parallel window p2 may be started speculatively before
+    # p1's line-sync result is known (its result is then discarded).
+    config = AppConfig(music_dir=tmp_path, early_exit_on_line_sync=False, cascade_concurrency=1)
     matcher = LyricsMatcher(config, [p1, p2, p3])
 
     result = await matcher.process_track(track)

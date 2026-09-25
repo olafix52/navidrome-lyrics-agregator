@@ -175,3 +175,7 @@ class ProcessResult(BaseModel):
     embedded: bool = False
     error_message: Optional[str] = None
     match_score: float = 0.0
+    # Set for negative outcomes backed by the negative cache: until this timestamp the same
+    # (unchanged) file would produce the same result, so rescans may skip it entirely.
+    recheck_after: Optional[float] = None
+    negative_key: Optional[str] = None

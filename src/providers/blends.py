@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional, Type
 
 from src.blender import blend_lyrics
 from src.models import LyricsResult, LyricsSyncType, TrackMetadata
@@ -37,26 +37,35 @@ class _BaseBlendProvider(BaseLyricsProvider):
     spare_name: str = ""
     spare_label: str = ""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        shared_provider: Optional[Callable[[str], BaseLyricsProvider]] = None,
+        **kwargs,
+    ):
+        """``shared_provider(name)`` returns the application-wide instance of a provider.
+
+        Using shared instances means the blends and the standalone cascade entries use the
+        same HTTP connection pools, the same rate limiters and the user's provider settings
+        (API keys, custom URLs). Without it (e.g. in isolation) private instances are created.
+        """
         super().__init__(*args, **kwargs)
-        self._apple = AppleMusicProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
-        self._spicy = SpicyLyricsProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
-        self._lrclib = LrclibProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
+        self._shared_provider = shared_provider
+        self._apple = self._provider("apple_music", AppleMusicProvider)
+        self._spicy = self._provider("spicylyrics", SpicyLyricsProvider)
+        self._lrclib = self._provider("lrclib", LrclibProvider)
         self._donor_provider: Optional[BaseLyricsProvider] = None
         self._spare_provider: Optional[BaseLyricsProvider] = None
         self._init_donors()
+
+    def _provider(self, name: str, cls: Type[BaseLyricsProvider]) -> BaseLyricsProvider:
+        if self._shared_provider is not None:
+            return self._shared_provider(name)
+        return cls(
+            user_agent=self.user_agent,
+            default_timeout=self.timeout,
+            max_retries=self.max_retries,
+        )
 
     def _init_donors(self) -> None:
         raise NotImplementedError
@@ -64,21 +73,21 @@ class _BaseBlendProvider(BaseLyricsProvider):
     async def _fetch_base(self, track: TrackMetadata) -> Optional[LyricsResult]:
         """Fetch pristine text and line structure from Apple Music, SpicyLyrics, or LRCLIB."""
         try:
-            res = await self._apple.get_lyrics(track)
+            res = await self._apple.fetch(track)
             if res and res.content:
                 return res
         except Exception as e:
             logger.debug(f"[{self.name}] Apple Music base lookup error: {e}")
 
         try:
-            res = await self._spicy.get_lyrics(track)
+            res = await self._spicy.fetch(track)
             if res and res.content:
                 return res
         except Exception as e:
             logger.debug(f"[{self.name}] SpicyLyrics base fallback error: {e}")
 
         try:
-            res = await self._lrclib.get_lyrics(track)
+            res = await self._lrclib.fetch(track)
             if res and res.content:
                 return res
         except Exception as e:
@@ -90,7 +99,7 @@ class _BaseBlendProvider(BaseLyricsProvider):
         if not self._donor_provider:
             return None
         try:
-            return await self._donor_provider.get_lyrics(track)
+            return await self._donor_provider.fetch(track)
         except Exception as e:
             logger.debug(f"[{self.name}] Timing donor ({self.donor_label}) error: {e}")
             return None
@@ -99,7 +108,7 @@ class _BaseBlendProvider(BaseLyricsProvider):
         if not self._spare_provider:
             return None
         try:
-            return await self._spare_provider.get_lyrics(track)
+            return await self._spare_provider.fetch(track)
         except Exception as e:
             logger.debug(f"[{self.name}] Spare timing donor ({self.spare_label}) error: {e}")
             return None
@@ -162,11 +171,7 @@ class AppleQQBlendProvider(_BaseBlendProvider):
     donor_label = "QQ Music"
 
     def _init_donors(self) -> None:
-        self._donor_provider = QQMusicProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
+        self._donor_provider = self._provider("qqmusic", QQMusicProvider)
 
 
 class AppleKugouBlendProvider(_BaseBlendProvider):
@@ -178,11 +183,7 @@ class AppleKugouBlendProvider(_BaseBlendProvider):
     donor_label = "Kugou"
 
     def _init_donors(self) -> None:
-        self._donor_provider = KugouProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
+        self._donor_provider = self._provider("kugou", KugouProvider)
 
 
 class AppleNetEaseBlendProvider(_BaseBlendProvider):
@@ -194,11 +195,7 @@ class AppleNetEaseBlendProvider(_BaseBlendProvider):
     donor_label = "NetEase"
 
     def _init_donors(self) -> None:
-        self._donor_provider = NetEaseProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
+        self._donor_provider = self._provider("netease", NetEaseProvider)
 
 
 class AppleNetEaseQQBlendProvider(_BaseBlendProvider):
@@ -212,16 +209,8 @@ class AppleNetEaseQQBlendProvider(_BaseBlendProvider):
     spare_label = "QQ Music"
 
     def _init_donors(self) -> None:
-        self._donor_provider = NetEaseProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
-        self._spare_provider = QQMusicProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
+        self._donor_provider = self._provider("netease", NetEaseProvider)
+        self._spare_provider = self._provider("qqmusic", QQMusicProvider)
 
 
 class AppleNetEaseKugouBlendProvider(_BaseBlendProvider):
@@ -235,13 +224,5 @@ class AppleNetEaseKugouBlendProvider(_BaseBlendProvider):
     spare_label = "Kugou"
 
     def _init_donors(self) -> None:
-        self._donor_provider = NetEaseProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
-        self._spare_provider = KugouProvider(
-            user_agent=self.user_agent,
-            default_timeout=self.timeout,
-            max_retries=self.max_retries,
-        )
+        self._donor_provider = self._provider("netease", NetEaseProvider)
+        self._spare_provider = self._provider("kugou", KugouProvider)

@@ -210,6 +210,8 @@ Aby przeskanować dużą bibliotekę muzyczną w najkrótszym czasie:
 - **Tryb szybkiej synchronizacji (`--fast-line-sync`):** Zatrzymuje przeszukiwanie kaskady natychmiast po znalezieniu tekstu zsynchronizowanego liniowo (LRC), pomijając pozostałe zapytania word-sync.
 - **Budżet zapytań word-sync (`--word-sync-budget N`):** Ogranicza zapytania o teksty sylabowe/słowne do $N$ pierwszych dostawców przed zatwierdzeniem LRC (np. `--word-sync-budget 3`).
 - **Zwiększ współbieżność (`--concurrency`):** Ustaw `--concurrency 16` lub `24`, aby asynchronicznie przetwarzać wiele utworów naraz.
+- **Równoległa kaskada dostawców (`--cascade-concurrency N`, domyślnie `2`):** Odpytuje kolejnych dostawców, czekając na bieżącego; wyniki są nadal brane w kolejności priorytetu. `1` = zapytania ściśle sekwencyjne.
+- **Przyrostowe ponowne skany (automatycznie):** Niezmienione pliki, których ostatni wynik jest nadal ważny (brak tekstu, TTL nie wygasł), są pomijane przy kolejnych skanach po samym `stat`, bez ponownego czytania tagów.
 - **Pomiń utwory posiadające już jakikolwiek tekst (`NLA_UPGRADE_QUALITY=false`):** Domyślnie agregator odpytuje serwery w poszukiwaniu TTML, nawet jeśli istnieje `.lrc`. Wyłączenie tej opcji sprawi, że utwory z tekstem zostaną pominięte w ułamku milisekundy:
   ```bash
   NLA_UPGRADE_QUALITY=false python -m src.main scan -d /ścieżka/do/muzyki --concurrency 24

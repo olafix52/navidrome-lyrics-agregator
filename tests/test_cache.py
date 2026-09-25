@@ -19,10 +19,11 @@ async def test_cache_initialization_and_wal(temp_cache: LyricsCache):
     await temp_cache.initialize()
     assert temp_cache.db_path.exists()
 
-    with temp_cache._get_raw_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA journal_mode;")
-        mode = cursor.fetchone()[0].lower()
+    # WAL is persisted in the database file: an independent connection must see it
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(str(temp_cache.db_path))) as conn:
+        mode = conn.execute("PRAGMA journal_mode;").fetchone()[0].lower()
         assert mode == "wal"
 
 

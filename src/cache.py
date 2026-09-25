@@ -1,14 +1,14 @@
 """SQLite-backed persistent cache for negative lyrics lookups and lookup metadata."""
 
 import asyncio
-from contextlib import closing
 from dataclasses import dataclass, field
 import hashlib
 import logging
 from pathlib import Path
 import sqlite3
+import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from src.models import TrackMetadata
 
@@ -26,8 +26,85 @@ class NegativeCacheHit:
     last_providers: List[str] = field(default_factory=list)
 
 
+class FileState(NamedTuple):
+    """Last known state of an audio file whose outcome does not need re-checking yet."""
+    mtime_ns: int
+    size: int
+    context: str
+    recheck_after: float
+
+
 # Negative-cache scope for "an upgrade search found nothing better than the existing sidecar"
 UPGRADE_SCOPE = "upgrade"
+# recheck_after for outcomes that stay valid until the file itself changes
+RECHECK_NEVER = 1e18
+
+
+class _ConnectionPool:
+    """One SQLite connection per (thread, database file), reused across calls.
+
+    Opening a connection and re-running PRAGMAs for every lookup dominated cache cost on
+    large scans. Worker threads (``asyncio.to_thread``) are long-lived, so each keeps its
+    own connection. ``close(db)`` invalidates connections of that database in all threads
+    (generation counter) and closes them.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+        self._lock = threading.Lock()
+        self._generation: Dict[str, int] = {}
+        self._open: List[Tuple[str, sqlite3.Connection]] = []
+
+    def get(self, db_path: Path, timeout: float = 10.0) -> sqlite3.Connection:
+        key = str(db_path)
+        conns: Optional[Dict[str, Tuple[int, sqlite3.Connection]]] = getattr(self._local, "conns", None)
+        if conns is None:
+            conns = self._local.conns = {}
+        gen = self._generation.get(key, 0)
+        entry = conns.get(key)
+        if entry is not None and entry[0] == gen:
+            return entry[1]
+
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # Each connection is only ever used by the thread that created it; closing happens
+        # from another thread at shutdown, hence check_same_thread=False.
+        conn = sqlite3.connect(key, timeout=timeout, check_same_thread=False)
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA mmap_size = 268435456;")
+        conn.execute("PRAGMA temp_store = MEMORY;")
+        conn.execute("PRAGMA cache_size = -8000;")
+        conns[key] = (gen, conn)
+        with self._lock:
+            self._open.append((key, conn))
+        return conn
+
+    def close(self, db_path: Optional[Path] = None) -> None:
+        target = str(db_path) if db_path is not None else None
+        with self._lock:
+            to_close = [(k, c) for k, c in self._open if target is None or k == target]
+            self._open = [(k, c) for k, c in self._open if not (target is None or k == target)]
+            keys = {k for k, _ in to_close} | ({target} if target else set(self._generation))
+            for k in keys:
+                self._generation[k] = self._generation.get(k, 0) + 1
+        for _, conn in to_close:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+_POOL = _ConnectionPool()
+_SPOTIFY_TABLE_READY: set = set()
+
+
+def close_cache_connections(db_path: Optional[Path | str] = None) -> None:
+    """Close pooled SQLite connections (all databases, or only ``db_path``)."""
+    _POOL.close(Path(db_path) if db_path is not None else None)
+    if db_path is None:
+        _SPOTIFY_TABLE_READY.clear()
+    else:
+        _SPOTIFY_TABLE_READY.discard(str(db_path))
 
 _DEFAULT_CACHE_DB_PATH: Path = Path("data/lyrics_cache.db")
 _ACTIVE_CACHE_DB_PATH: Optional[Path] = None
@@ -83,35 +160,35 @@ def get_cached_spotify_id(
         return None
 
     try:
-        with closing(sqlite3.connect(str(target_db), timeout=5.0)) as conn:
-            cursor = conn.cursor()
-            found_id: Optional[str] = None
+        conn = _POOL.get(target_db, timeout=5.0)
+        cursor = conn.cursor()
+        found_id: Optional[str] = None
 
+        if isrc and isrc.strip():
+            cursor.execute(
+                "SELECT spotify_id FROM spotify_id_cache WHERE isrc = ? LIMIT 1;",
+                (isrc.strip().upper(),),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                found_id = str(row[0]).strip()
+
+        if not found_id and meta_key != ":::":
+            cursor.execute(
+                "SELECT spotify_id FROM spotify_id_cache WHERE cache_key = ? LIMIT 1;",
+                (meta_key,),
+            )
+            row = cursor.fetchone()
+            if row and row[0]:
+                found_id = str(row[0]).strip()
+
+        if found_id:
+            # Populate in-memory cache for subsequent instant hits
             if isrc and isrc.strip():
-                cursor.execute(
-                    "SELECT spotify_id FROM spotify_id_cache WHERE isrc = ? LIMIT 1;",
-                    (isrc.strip().upper(),),
-                )
-                row = cursor.fetchone()
-                if row and row[0]:
-                    found_id = str(row[0]).strip()
-
-            if not found_id and meta_key != ":::":
-                cursor.execute(
-                    "SELECT spotify_id FROM spotify_id_cache WHERE cache_key = ? LIMIT 1;",
-                    (meta_key,),
-                )
-                row = cursor.fetchone()
-                if row and row[0]:
-                    found_id = str(row[0]).strip()
-
-            if found_id:
-                # Populate in-memory cache for subsequent instant hits
-                if isrc and isrc.strip():
-                    _SPOTIFY_ID_MEM_CACHE[f"isrc:{isrc.strip().upper()}"] = found_id
-                if meta_key != ":::":
-                    _SPOTIFY_ID_MEM_CACHE[meta_key] = found_id
-                return found_id
+                _SPOTIFY_ID_MEM_CACHE[f"isrc:{isrc.strip().upper()}"] = found_id
+            if meta_key != ":::":
+                _SPOTIFY_ID_MEM_CACHE[meta_key] = found_id
+            return found_id
     except sqlite3.OperationalError as e:
         # Table not created yet (no Spotify ID stored so far) or database busy
         logger.debug(f"[cache] Spotify ID lookup unavailable in {target_db}: {e}")
@@ -153,22 +230,22 @@ def set_cached_spotify_id(
     # 2. Persist in SQLite
     target_db = Path(db_path) if db_path else get_active_cache_db_path()
     try:
-        target_db.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(str(target_db), timeout=5.0)) as conn:
-            conn.execute("PRAGMA journal_mode = WAL;")
-            conn.execute("PRAGMA synchronous = NORMAL;")
-            conn.execute("PRAGMA busy_timeout = 5000;")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS spotify_id_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    artist TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    isrc TEXT,
-                    spotify_id TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_spotify_id_isrc ON spotify_id_cache(isrc);")
+        conn = _POOL.get(target_db, timeout=5.0)
+        with conn:  # commit, or roll back on error so the pooled connection stays usable
+            if str(target_db) not in _SPOTIFY_TABLE_READY:
+                conn.execute("PRAGMA journal_mode = WAL;")
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS spotify_id_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        artist TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        isrc TEXT,
+                        spotify_id TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_spotify_id_isrc ON spotify_id_cache(isrc);")
+                _SPOTIFY_TABLE_READY.add(str(target_db))
 
             now = time.time()
             clean_a = (artist or "").strip()
@@ -183,7 +260,6 @@ def set_cached_spotify_id(
                     isrc = COALESCE(excluded.isrc, spotify_id_cache.isrc),
                     created_at = excluded.created_at;
             """, (meta_key, clean_a, clean_t, norm_isrc, sp_id, now))
-            conn.commit()
     except Exception as e:
         logger.debug(f"[cache] Failed saving Spotify ID to database {target_db}: {e}")
 
@@ -234,28 +310,25 @@ class LyricsCache:
         self._lock = asyncio.Lock()
         set_active_cache_db_path(self.db_path)
 
-    def _get_raw_connection(self) -> sqlite3.Connection:
-        """Create a configured SQLite connection with busy timeout.
+    def _conn(self) -> sqlite3.Connection:
+        """Pooled connection of the calling thread.
 
-        WAL journal mode is persistent in the database file and is set once in ``_init_db_sync``.
-        Callers must close the connection (use ``closing(...)``); ``with conn:`` alone only
-        commits/rolls back and leaves the connection open.
+        Writes must run inside ``with conn:`` so they are committed, or rolled back on error
+        (an open transaction on a pooled connection would keep the database locked).
         """
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
-        conn.execute("PRAGMA mmap_size = 268435456;")
-        conn.execute("PRAGMA temp_store = MEMORY;")
-        conn.execute("PRAGMA cache_size = -8000;")
-        return conn
+        return _POOL.get(self.db_path)
+
+    def close(self) -> None:
+        """Close this database's pooled connections (reopened transparently on next use)."""
+        close_cache_connections(self.db_path)
 
     def _init_db_sync(self) -> None:
         """Create tables and indexes synchronously."""
         if self._initialized:
             return
 
-        with closing(self._get_raw_connection()) as conn:
+        conn = self._conn()
+        with conn:
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS negative_cache (
@@ -285,7 +358,20 @@ class LyricsCache:
                 );
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_spotify_id_isrc ON spotify_id_cache(isrc);")
-            conn.commit()
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS file_state (
+                    path TEXT PRIMARY KEY,
+                    mtime_ns INTEGER NOT NULL,
+                    size INTEGER NOT NULL,
+                    context TEXT NOT NULL,
+                    recheck_after REAL NOT NULL,
+                    cache_key TEXT,
+                    updated_at REAL NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_state_cache_key ON file_state(cache_key);")
+        _SPOTIFY_TABLE_READY.add(str(self.db_path))
 
         self._initialized = True
 
@@ -313,36 +399,35 @@ class LyricsCache:
     def _is_negative_hit_sync(self, cache_key: str) -> Optional[NegativeCacheHit]:
         self._init_db_sync()
         now = time.time()
-        with closing(self._get_raw_connection()) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT cache_key, updated_at, expires_at, failure_count, last_providers
-                FROM negative_cache
-                WHERE cache_key = ?
-                """,
-                (cache_key,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                return None
+        cursor = self._conn().cursor()
+        cursor.execute(
+            """
+            SELECT cache_key, updated_at, expires_at, failure_count, last_providers
+            FROM negative_cache
+            WHERE cache_key = ?
+            """,
+            (cache_key,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
 
-            key, updated_at, expires_at, failure_count, last_providers_str = row
-            if expires_at <= now:
-                # Expired
-                return None
+        key, updated_at, expires_at, failure_count, last_providers_str = row
+        if expires_at <= now:
+            # Expired
+            return None
 
-            remaining_sec = expires_at - now
-            providers = [p.strip() for p in (last_providers_str or "").split(",") if p.strip()]
+        remaining_sec = expires_at - now
+        providers = [p.strip() for p in (last_providers_str or "").split(",") if p.strip()]
 
-            return NegativeCacheHit(
-                cache_key=key,
-                remaining_seconds=remaining_sec,
-                remaining_days=round(remaining_sec / 86400.0, 1),
-                failure_count=failure_count or 1,
-                last_checked_at=updated_at,
-                last_providers=providers,
-            )
+        return NegativeCacheHit(
+            cache_key=key,
+            remaining_seconds=remaining_sec,
+            remaining_days=round(remaining_sec / 86400.0, 1),
+            failure_count=failure_count or 1,
+            last_checked_at=updated_at,
+            last_providers=providers,
+        )
 
     async def is_negative_hit(
         self,
@@ -368,7 +453,8 @@ class LyricsCache:
         expires_at = now + (self.ttl_days * 86400.0)
         providers_str = ",".join(providers_checked)
 
-        with closing(self._get_raw_connection()) as conn:
+        conn = self._conn()
+        with conn:
             conn.execute(
                 """
                 INSERT INTO negative_cache (
@@ -383,7 +469,6 @@ class LyricsCache:
                 """,
                 (cache_key, artist, title, duration, file_path, now, now, expires_at, providers_str),
             )
-            conn.commit()
 
     async def record_negative(
         self,
@@ -412,11 +497,13 @@ class LyricsCache:
 
     def _remove_sync(self, cache_key: str) -> bool:
         self._init_db_sync()
-        with closing(self._get_raw_connection()) as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM negative_cache WHERE cache_key = ?", (cache_key,))
-            conn.commit()
-            return cursor.rowcount > 0
+        conn = self._conn()
+        with conn:
+            cursor = conn.execute("DELETE FROM negative_cache WHERE cache_key = ?", (cache_key,))
+            removed = cursor.rowcount > 0
+            # Files skipped because of this entry must be looked at again
+            conn.execute("DELETE FROM file_state WHERE cache_key = ?", (cache_key,))
+        return removed
 
     async def remove(self, track: TrackMetadata, scope: Optional[str] = None) -> bool:
         """Remove a track from negative cache (e.g. when lyrics are found or upgraded)."""
@@ -427,14 +514,18 @@ class LyricsCache:
     def _clear_sync(self, expired_only: bool = False) -> int:
         self._init_db_sync()
         now = time.time()
-        with closing(self._get_raw_connection()) as conn:
-            cursor = conn.cursor()
+        conn = self._conn()
+        with conn:
             if expired_only:
-                cursor.execute("DELETE FROM negative_cache WHERE expires_at <= ?", (now,))
+                cursor = conn.execute("DELETE FROM negative_cache WHERE expires_at <= ?", (now,))
+                deleted = cursor.rowcount
+                conn.execute("DELETE FROM file_state WHERE recheck_after <= ?", (now,))
             else:
-                cursor.execute("DELETE FROM negative_cache;")
-            conn.commit()
-            return cursor.rowcount
+                cursor = conn.execute("DELETE FROM negative_cache;")
+                deleted = cursor.rowcount
+                # File states only exist to short-circuit negative outcomes
+                conn.execute("DELETE FROM file_state;")
+        return deleted
 
     async def clear(self, expired_only: bool = False) -> int:
         """Clear cache entries, optionally only expired ones. Returns count of deleted entries."""
@@ -482,18 +573,20 @@ class LyricsCache:
     def _get_stats_sync(self) -> Dict[str, Any]:
         self._init_db_sync()
         now = time.time()
-        with closing(self._get_raw_connection()) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM negative_cache")
-            total = cursor.fetchone()[0]
+        cursor = self._conn().cursor()
+        cursor.execute("SELECT COUNT(*) FROM negative_cache")
+        total = cursor.fetchone()[0]
 
-            cursor.execute("SELECT COUNT(*) FROM negative_cache WHERE expires_at > ?", (now,))
-            active = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM negative_cache WHERE expires_at > ?", (now,))
+        active = cursor.fetchone()[0]
 
-            expired = total - active
+        expired = total - active
 
-            cursor.execute("SELECT COUNT(*) FROM spotify_id_cache")
-            total_spotify = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM spotify_id_cache")
+        total_spotify = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM file_state WHERE recheck_after > ?", (now,))
+        tracked_files = cursor.fetchone()[0]
 
         size_bytes = self.db_path.stat().st_size if self.db_path.exists() else 0
 
@@ -503,6 +596,7 @@ class LyricsCache:
             "active_negative_entries": active,
             "expired_negative_entries": expired,
             "total_spotify_ids": total_spotify,
+            "tracked_unchanged_files": tracked_files,
             "ttl_days": self.ttl_days,
             "db_size_bytes": size_bytes,
             "db_size_kb": round(size_bytes / 1024.0, 1),
@@ -512,3 +606,48 @@ class LyricsCache:
         """Fetch statistical overview of the cache state."""
         await self.initialize()
         return await asyncio.to_thread(self._get_stats_sync)
+
+    # ------------------------------------------------------------------
+    # File state (incremental rescans)
+    # ------------------------------------------------------------------
+
+    def _load_file_states_sync(self) -> Dict[str, FileState]:
+        self._init_db_sync()
+        rows = self._conn().execute(
+            "SELECT path, mtime_ns, size, context, recheck_after FROM file_state WHERE recheck_after > ?",
+            (time.time(),),
+        ).fetchall()
+        return {path: FileState(mtime_ns, size, context, recheck_after) for path, mtime_ns, size, context, recheck_after in rows}
+
+    async def load_file_states(self) -> Dict[str, FileState]:
+        """All still-valid file states, keyed by audio path (loaded once per scan)."""
+        await self.initialize()
+        return await asyncio.to_thread(self._load_file_states_sync)
+
+    def _save_file_states_sync(self, rows: List[Tuple[str, int, int, str, float, Optional[str]]]) -> None:
+        self._init_db_sync()
+        now = time.time()
+        conn = self._conn()
+        with conn:
+            conn.executemany(
+                """
+                INSERT INTO file_state (path, mtime_ns, size, context, recheck_after, cache_key, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    mtime_ns = excluded.mtime_ns,
+                    size = excluded.size,
+                    context = excluded.context,
+                    recheck_after = excluded.recheck_after,
+                    cache_key = excluded.cache_key,
+                    updated_at = excluded.updated_at;
+                """,
+                [(*row, now) for row in rows],
+            )
+
+    async def save_file_states(self, rows: Iterable[Tuple[str, int, int, str, float, Optional[str]]]) -> None:
+        """Upsert ``(path, mtime_ns, size, context, recheck_after, cache_key)`` rows in one transaction."""
+        batch = list(rows)
+        if not batch:
+            return
+        await self.initialize()
+        await asyncio.to_thread(self._save_file_states_sync, batch)
