@@ -145,3 +145,74 @@ async def test_concurrent_writes(temp_cache: LyricsCache):
 
     stats = await temp_cache.get_stats()
     assert stats["total_negative_entries"] == 50
+
+
+@pytest.mark.asyncio
+async def test_spotify_id_cache_in_memory_and_sqlite(temp_cache: LyricsCache):
+    from src.cache import (
+        clear_spotify_id_mem_cache,
+        get_cached_spotify_id,
+        set_cached_spotify_id,
+    )
+
+    clear_spotify_id_mem_cache()
+    valid_id = "0IPJBx1bjznqjdYBXj3l19"
+
+    # Initially not found
+    assert get_cached_spotify_id("Mata", "Patoreakcja", db_path=temp_cache.db_path) is None
+
+    # Save to cache
+    set_cached_spotify_id("Mata", "Patoreakcja", valid_id, db_path=temp_cache.db_path)
+
+    # 1. In-memory hit
+    assert get_cached_spotify_id("Mata", "Patoreakcja", db_path=temp_cache.db_path) == valid_id
+    # Case and whitespace insensitivity
+    assert get_cached_spotify_id("  mata  ", "  PATOREAKCJA  ", db_path=temp_cache.db_path) == valid_id
+
+    # 2. Clear in-memory cache to force SQLite read
+    clear_spotify_id_mem_cache()
+
+    # SQLite persistent hit
+    assert get_cached_spotify_id("Mata", "Patoreakcja", db_path=temp_cache.db_path) == valid_id
+
+    # Stats should show 1 cached Spotify ID
+    stats = await temp_cache.get_stats()
+    assert stats["total_spotify_ids"] == 1
+
+
+@pytest.mark.asyncio
+async def test_spotify_id_cache_isrc_lookup(temp_cache: LyricsCache):
+    from src.cache import (
+        clear_spotify_id_mem_cache,
+        get_cached_spotify_id,
+        set_cached_spotify_id,
+    )
+
+    clear_spotify_id_mem_cache()
+    valid_id = "4cOdK2wGLETKBW3PvgPWqT"
+    isrc = "GBUM71029604"
+
+    set_cached_spotify_id("Queen", "Bohemian Rhapsody", valid_id, isrc=isrc, db_path=temp_cache.db_path)
+
+    # Lookup by ISRC even with different artist/title
+    assert get_cached_spotify_id(isrc=isrc, db_path=temp_cache.db_path) == valid_id
+    assert get_cached_spotify_id("Different Artist", "Different Title", isrc=isrc, db_path=temp_cache.db_path) == valid_id
+
+    # Clear memory cache and verify persistent ISRC lookup
+    clear_spotify_id_mem_cache()
+    assert get_cached_spotify_id(isrc=isrc, db_path=temp_cache.db_path) == valid_id
+
+
+@pytest.mark.asyncio
+async def test_spotify_id_invalid_id_ignored(temp_cache: LyricsCache):
+    from src.cache import (
+        clear_spotify_id_mem_cache,
+        get_cached_spotify_id,
+        set_cached_spotify_id,
+    )
+
+    clear_spotify_id_mem_cache()
+    # Less than 22 characters or invalid
+    set_cached_spotify_id("Artist", "Song", "too_short", db_path=temp_cache.db_path)
+    assert get_cached_spotify_id("Artist", "Song", db_path=temp_cache.db_path) is None
+

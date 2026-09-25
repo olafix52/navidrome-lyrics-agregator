@@ -905,6 +905,49 @@ async def test_musixmatch_spotify_id_query(sample_track):
         assert "Musixmatch/" in macro_call_kwargs.kwargs["headers"]["X-User-Agent"]
 
 
+@pytest.mark.asyncio
+async def test_musixmatch_uses_cached_spotify_id_when_track_has_none(sample_track):
+    from src.cache import set_cached_spotify_id
+    sample_track.spotify_id = None
+    set_cached_spotify_id(sample_track.artist, sample_track.title, "4u7EnebtmKWzUH433cf5Qv")
+
+    provider = MusixmatchProvider(config=ProviderConfig())
+
+    mock_token_resp = MagicMock()
+    mock_token_resp.json.return_value = {
+        "message": {"header": {"status_code": 200}, "body": {"user_token": "valid_token"}}
+    }
+
+    mock_macro_resp = MagicMock()
+    mock_macro_resp.json.return_value = {
+        "message": {
+            "header": {"status_code": 200},
+            "body": {
+                "macro_calls": {
+                    "matcher.track.get": {
+                        "message": {
+                            "body": {"track": {"track_name": "Bohemian Rhapsody", "artist_name": "Queen"}}
+                        }
+                    },
+                    "track.subtitles.get": {
+                        "message": {
+                            "header": {"status_code": 200},
+                            "body": {"subtitle_list": [{"subtitle": {"subtitle_body": "[00:01.00] Life"}}]},
+                        }
+                    },
+                }
+            },
+        }
+    }
+
+    with patch.object(provider, "request_with_retry", side_effect=[mock_token_resp, mock_macro_resp]) as mock_req:
+        result = await provider.get_lyrics(sample_track)
+        assert result is not None
+        assert sample_track.spotify_id == "4u7EnebtmKWzUH433cf5Qv"
+        macro_call_kwargs = mock_req.call_args_list[1]
+        assert macro_call_kwargs.kwargs["params"]["track_spotify_id"] == "4u7EnebtmKWzUH433cf5Qv"
+
+
 def test_musixmatch_richsync_gap_smoothing_and_zero_repair():
     # Line 1: Word with zero duration (end == start == 1.0) and space token delimiting next word
     # Line 2: Words with gap < 0.4s (smoothed) and gap >= 0.4s (preserved)
@@ -1373,6 +1416,61 @@ async def test_spicylyrics_provider_spotify_search_resolution(sample_track):
         assert result is not None
         assert result.metadata["spotify_id"] == "4cOdK2wGLETKBW3PvgPWqT"
         assert "[00:05.00]Mama, just killed a man" in result.content
+        assert sample_track.spotify_id == "4cOdK2wGLETKBW3PvgPWqT"
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_subsequent_call_reuses_resolved_spotify_id_without_network_search(sample_track):
+    sample_track.spotify_id = "4cOdK2wGLETKBW3PvgPWqT"
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_spicy_resp = MagicMock()
+    mock_spicy_resp.status_code = 200
+    mock_spicy_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "Content": [{"Text": "Mama, just killed a man", "StartTime": 5.0}],
+        },
+    }
+
+    with patch.object(provider, "_search_spotify_api", new_callable=AsyncMock) as mock_api_search, \
+         patch.object(provider, "_search_spotify_anonymous", new_callable=AsyncMock) as mock_anon_search, \
+         patch.object(provider, "request_with_retry", return_value=mock_spicy_resp):
+        res = await provider.get_lyrics(sample_track)
+        assert res is not None
+        mock_api_search.assert_not_called()
+        mock_anon_search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_spicylyrics_reuses_cached_spotify_id_without_network_search(sample_track):
+    from src.cache import set_cached_spotify_id
+    sample_track.spotify_id = None
+    set_cached_spotify_id(sample_track.clean_artist, sample_track.clean_title, "4cOdK2wGLETKBW3PvgPWqT")
+
+    provider = SpicyLyricsProvider(config=ProviderConfig(api_key="sl_sk_test_123"))
+
+    mock_spicy_resp = MagicMock()
+    mock_spicy_resp.status_code = 200
+    mock_spicy_resp.json.return_value = {
+        "Status": 200,
+        "Type": "object",
+        "Body": {
+            "Type": "Line",
+            "Content": [{"Text": "Mama, just killed a man", "StartTime": 5.0}],
+        },
+    }
+
+    with patch.object(provider, "_search_spotify_api", new_callable=AsyncMock) as mock_api_search, \
+         patch.object(provider, "_search_spotify_anonymous", new_callable=AsyncMock) as mock_anon_search, \
+         patch.object(provider, "request_with_retry", return_value=mock_spicy_resp):
+        res = await provider.get_lyrics(sample_track)
+        assert res is not None
+        assert sample_track.spotify_id == "4cOdK2wGLETKBW3PvgPWqT"
+        mock_api_search.assert_not_called()
+        mock_anon_search.assert_not_called()
 
 
 @pytest.mark.asyncio

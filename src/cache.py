@@ -25,11 +25,178 @@ class NegativeCacheHit:
     last_providers: List[str] = field(default_factory=list)
 
 
+_DEFAULT_CACHE_DB_PATH: Path = Path("data/lyrics_cache.db")
+_ACTIVE_CACHE_DB_PATH: Optional[Path] = None
+_SPOTIFY_ID_MEM_CACHE: Dict[str, str] = {}
+
+
+def set_active_cache_db_path(db_path: Path | str) -> None:
+    """Set globally active SQLite database path for convenience helper functions."""
+    global _ACTIVE_CACHE_DB_PATH
+    _ACTIVE_CACHE_DB_PATH = Path(db_path)
+
+
+def get_active_cache_db_path() -> Path:
+    """Get currently active SQLite database path."""
+    return _ACTIVE_CACHE_DB_PATH or _DEFAULT_CACHE_DB_PATH
+
+
+def _spotify_cache_key(artist: Optional[str], title: Optional[str]) -> str:
+    """Generate normalized cache key for track artist and title."""
+    a = (artist or "").strip().lower()
+    t = (title or "").strip().lower()
+    return f"{a}:::{t}"
+
+
+def clear_spotify_id_mem_cache() -> None:
+    """Clear in-memory Spotify ID cache (used primarily for test isolation)."""
+    _SPOTIFY_ID_MEM_CACHE.clear()
+
+
+def get_cached_spotify_id(
+    artist: Optional[str] = None,
+    title: Optional[str] = None,
+    isrc: Optional[str] = None,
+    db_path: Optional[Path | str] = None,
+) -> Optional[str]:
+    """Retrieve Spotify track ID from fast in-memory cache or persistent SQLite database.
+    
+    Supports resolution by ISRC or (artist, title).
+    """
+    # 1. Fast in-memory lookup
+    if isrc and isrc.strip():
+        isrc_key = f"isrc:{isrc.strip().upper()}"
+        if isrc_key in _SPOTIFY_ID_MEM_CACHE:
+            return _SPOTIFY_ID_MEM_CACHE[isrc_key]
+
+    meta_key = _spotify_cache_key(artist, title)
+    if meta_key != ":::" and meta_key in _SPOTIFY_ID_MEM_CACHE:
+        return _SPOTIFY_ID_MEM_CACHE[meta_key]
+
+    # 2. SQLite persistent lookup
+    target_db = Path(db_path) if db_path else get_active_cache_db_path()
+    if not target_db.exists():
+        return None
+
+    try:
+        conn = sqlite3.connect(str(target_db), timeout=5.0)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS spotify_id_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    artist TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    isrc TEXT,
+                    spotify_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+            """)
+            cursor = conn.cursor()
+            found_id: Optional[str] = None
+
+            if isrc and isrc.strip():
+                cursor.execute(
+                    "SELECT spotify_id FROM spotify_id_cache WHERE isrc = ? LIMIT 1;",
+                    (isrc.strip().upper(),),
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    found_id = str(row[0]).strip()
+
+            if not found_id and meta_key != ":::":
+                cursor.execute(
+                    "SELECT spotify_id FROM spotify_id_cache WHERE cache_key = ? LIMIT 1;",
+                    (meta_key,),
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    found_id = str(row[0]).strip()
+
+            if found_id:
+                # Populate in-memory cache for subsequent instant hits
+                if isrc and isrc.strip():
+                    _SPOTIFY_ID_MEM_CACHE[f"isrc:{isrc.strip().upper()}"] = found_id
+                if meta_key != ":::":
+                    _SPOTIFY_ID_MEM_CACHE[meta_key] = found_id
+                return found_id
+
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"[cache] Failed reading Spotify ID from database {target_db}: {e}")
+
+    return None
+
+
+def set_cached_spotify_id(
+    artist: Optional[str],
+    title: Optional[str],
+    spotify_id: str,
+    isrc: Optional[str] = None,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    """Store resolved Spotify track ID in both in-memory cache and persistent SQLite database."""
+    if not spotify_id or not isinstance(spotify_id, str):
+        return
+    sp_id = spotify_id.strip()
+    if len(sp_id) != 22:
+        return
+
+    meta_key = _spotify_cache_key(artist, title)
+    norm_isrc = isrc.strip().upper() if isrc and isrc.strip() else None
+
+    # 1. Update in-memory cache
+    if norm_isrc:
+        _SPOTIFY_ID_MEM_CACHE[f"isrc:{norm_isrc}"] = sp_id
+    if meta_key != ":::":
+        _SPOTIFY_ID_MEM_CACHE[meta_key] = sp_id
+
+    # 2. Persist in SQLite
+    target_db = Path(db_path) if db_path else get_active_cache_db_path()
+    try:
+        target_db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(target_db), timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS spotify_id_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    artist TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    isrc TEXT,
+                    spotify_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_spotify_id_isrc ON spotify_id_cache(isrc);")
+
+            now = time.time()
+            clean_a = (artist or "").strip()
+            clean_t = (title or "").strip()
+
+            conn.execute("""
+                INSERT INTO spotify_id_cache (
+                    cache_key, artist, title, isrc, spotify_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    spotify_id = excluded.spotify_id,
+                    isrc = COALESCE(excluded.isrc, spotify_id_cache.isrc),
+                    created_at = excluded.created_at;
+            """, (meta_key, clean_a, clean_t, norm_isrc, sp_id, now))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.debug(f"[cache] Failed saving Spotify ID to database {target_db}: {e}")
+
+
 class LyricsCache:
-    """Thread-safe SQLite persistent cache for negative match results.
+    """Thread-safe SQLite persistent cache for negative match results and Spotify ID lookups.
     
     Prevents repeated expensive network cascade calls on audio tracks that
-    previously yielded no lyrics across any enabled provider.
+    previously yielded no lyrics or redundant Spotify ID search lookups.
     """
 
     def __init__(self, db_path: Path | str, ttl_days: float = 14.0):
@@ -37,6 +204,7 @@ class LyricsCache:
         self.ttl_days = max(0.0, float(ttl_days))
         self._initialized = False
         self._lock = asyncio.Lock()
+        set_active_cache_db_path(self.db_path)
 
     def _get_raw_connection(self) -> sqlite3.Connection:
         """Create a configured SQLite connection with WAL journal mode and busy timeout."""
@@ -72,6 +240,18 @@ class LyricsCache:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_negative_expires ON negative_cache(expires_at);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_negative_file_path ON negative_cache(file_path);")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS spotify_id_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    artist TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    isrc TEXT,
+                    spotify_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_spotify_id_isrc ON spotify_id_cache(isrc);")
             conn.commit()
 
         self._initialized = True
@@ -216,6 +396,44 @@ class LyricsCache:
         await self.initialize()
         return await asyncio.to_thread(self._clear_sync, expired_only)
 
+    def get_spotify_id(
+        self,
+        artist: Optional[str] = None,
+        title: Optional[str] = None,
+        isrc: Optional[str] = None,
+    ) -> Optional[str]:
+        """Fetch cached Spotify track ID synchronously from database or memory cache."""
+        return get_cached_spotify_id(artist=artist, title=title, isrc=isrc, db_path=self.db_path)
+
+    async def get_spotify_id_async(
+        self,
+        artist: Optional[str] = None,
+        title: Optional[str] = None,
+        isrc: Optional[str] = None,
+    ) -> Optional[str]:
+        """Fetch cached Spotify track ID asynchronously."""
+        return await asyncio.to_thread(self.get_spotify_id, artist, title, isrc)
+
+    def set_spotify_id(
+        self,
+        artist: Optional[str],
+        title: Optional[str],
+        spotify_id: str,
+        isrc: Optional[str] = None,
+    ) -> None:
+        """Store resolved Spotify track ID in persistent cache and memory cache."""
+        set_cached_spotify_id(artist=artist, title=title, spotify_id=spotify_id, isrc=isrc, db_path=self.db_path)
+
+    async def set_spotify_id_async(
+        self,
+        artist: Optional[str],
+        title: Optional[str],
+        spotify_id: str,
+        isrc: Optional[str] = None,
+    ) -> None:
+        """Store resolved Spotify track ID asynchronously."""
+        await asyncio.to_thread(self.set_spotify_id, artist, title, spotify_id, isrc)
+
     def _get_stats_sync(self) -> Dict[str, Any]:
         self._init_db_sync()
         now = time.time()
@@ -229,6 +447,9 @@ class LyricsCache:
 
             expired = total - active
 
+            cursor.execute("SELECT COUNT(*) FROM spotify_id_cache")
+            total_spotify = cursor.fetchone()[0]
+
         size_bytes = self.db_path.stat().st_size if self.db_path.exists() else 0
 
         return {
@@ -236,6 +457,7 @@ class LyricsCache:
             "total_negative_entries": total,
             "active_negative_entries": active,
             "expired_negative_entries": expired,
+            "total_spotify_ids": total_spotify,
             "ttl_days": self.ttl_days,
             "db_size_bytes": size_bytes,
             "db_size_kb": round(size_bytes / 1024.0, 1),

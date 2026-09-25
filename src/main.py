@@ -229,6 +229,17 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
     console.print(f"[dim]Cleaned: {metadata.clean_artist} - {metadata.clean_title}[/dim]")
     console.print()
 
+    if not metadata.spotify_id:
+        from src.cache import get_cached_spotify_id
+        cached_sp = get_cached_spotify_id(
+            artist=metadata.clean_artist or metadata.artist,
+            title=metadata.clean_title or metadata.title,
+            isrc=metadata.isrc,
+        )
+        if cached_sp:
+            metadata.spotify_id = cached_sp
+            console.print(f"[dim cyan]Reusing cached Spotify ID: {cached_sp}[/dim cyan]")
+
     for provider in providers:
         console.print(f"[bold yellow]Querying provider '{provider.name}'...[/bold yellow]")
         try:
@@ -283,6 +294,7 @@ async def run_cache_command(args: argparse.Namespace, config) -> None:
     table.add_row("Total Negative Entries", str(stats["total_negative_entries"]))
     table.add_row("Active Entries (within TTL)", str(stats["active_negative_entries"]))
     table.add_row("Expired Entries", str(stats["expired_negative_entries"]))
+    table.add_row("Cached Spotify IDs", str(stats.get("total_spotify_ids", 0)))
 
     console.print(table)
 

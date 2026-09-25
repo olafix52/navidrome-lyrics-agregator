@@ -363,7 +363,8 @@ class QQMusicProvider(BaseLyricsProvider):
     name = "qqmusic"
     description = "QQ Music / Tencent (QRC word-sync TTML & synced LRC lyrics)"
 
-    DEFAULT_SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
+    DEFAULT_SEARCH_URL = "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp"
+    SMARTBOX_SEARCH_URL = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg"
     DEFAULT_MUSICU_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg"
     DEFAULT_LYRIC_URL = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
 
@@ -389,11 +390,43 @@ class QQMusicProvider(BaseLyricsProvider):
         }
 
         resp = await self.request_with_retry("GET", search_url, params=search_params, headers=headers)
-        if not resp:
+        data = None
+        if resp and resp.status_code == 200:
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+
+        # Fallback to smartbox search if primary search failed, returned no JSON, or empty song list
+        if not data or not data.get("data", {}).get("song", {}).get("list"):
+            try:
+                sb_resp = await self.request_with_retry(
+                    "GET",
+                    self.SMARTBOX_SEARCH_URL,
+                    params={"key": query, "format": "json"},
+                    headers=headers,
+                )
+                if sb_resp and sb_resp.status_code == 200:
+                    sb_data = sb_resp.json()
+                    sb_items = sb_data.get("data", {}).get("song", {}).get("itemlist", [])
+                    if sb_items:
+                        converted_list = [
+                            {
+                                "songname": item.get("name", ""),
+                                "songmid": item.get("mid", ""),
+                                "singer": [{"name": item.get("singer", "")}],
+                                "interval": 0,
+                            }
+                            for item in sb_items
+                        ]
+                        data = {"data": {"song": {"list": converted_list}}}
+            except Exception as e:
+                logger.debug(f"[{self.name}] Smartbox fallback search error: {e}")
+
+        if not data:
             return None
 
         try:
-            data = resp.json()
             # Handle Tencent search censor keyword blocking (subcode: -10002 / "query forbid")
             if data.get("subcode") == -10002 or data.get("message") == "query forbid":
                 logger.debug(f"[{self.name}] Query forbidden by Tencent filter ({query}), attempting fallback queries...")

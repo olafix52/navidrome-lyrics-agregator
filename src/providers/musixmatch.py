@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.cache import get_cached_spotify_id
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
 from src.normalizer import calculate_candidate_score, clean_artist, clean_title, safe_float
 from src.providers.base import BaseLyricsProvider
@@ -369,6 +370,16 @@ class MusixmatchProvider(BaseLyricsProvider):
             params["f_subtitle_length_max_deviation"] = "3"
 
         sp_id = _extract_spotify_id(track.spotify_id) if track.spotify_id else None
+        if not sp_id:
+            cached_sp = get_cached_spotify_id(
+                artist=track.clean_artist or track.artist,
+                title=track.clean_title or track.title,
+                isrc=track.isrc,
+            )
+            if cached_sp:
+                track.spotify_id = cached_sp
+                sp_id = _extract_spotify_id(cached_sp)
+
         if sp_id:
             params["track_spotify_id"] = sp_id
 

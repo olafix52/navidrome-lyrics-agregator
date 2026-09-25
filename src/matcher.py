@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
-from src.cache import LyricsCache
+from src.cache import LyricsCache, get_cached_spotify_id
 from src.config import AppConfig
 from src.models import (
     LyricsSyncType,
@@ -73,6 +73,16 @@ class LyricsMatcher:
                 )
 
         logger.info(f"[SEARCHING] {track.display_name()} ({track.duration:.1f}s)")
+
+        # Pre-populate Spotify ID from cache if missing
+        if not track.spotify_id:
+            cached_sp = get_cached_spotify_id(
+                artist=track.clean_artist or track.artist,
+                title=track.clean_title or track.title,
+                isrc=track.isrc,
+            )
+            if cached_sp:
+                track.spotify_id = cached_sp
 
         # 3. Iterate through provider cascade with quality priority (WORD_SYNC > LINE_SYNC > UNSYNCED)
         best_match = None  # Tuple[LyricsResult, BaseLyricsProvider, float]

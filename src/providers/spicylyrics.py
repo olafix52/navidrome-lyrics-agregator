@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, List, Optional
 import httpx
 
+from src.cache import get_cached_spotify_id, set_cached_spotify_id
 from src.models import (
     LyricsFormat,
     LyricsResult,
@@ -356,26 +357,66 @@ class SpicyLyricsProvider(BaseLyricsProvider):
         return None
 
     async def _resolve_spotify_track_id(self, track: TrackMetadata) -> Optional[str]:
-        """Resolve Spotify track ID from audio tags, Spotify Web API, anonymous Pathfinder, or MusicBrainz."""
+        """Resolve Spotify track ID from audio tags, cache, Spotify Web API, anonymous Pathfinder, or MusicBrainz."""
         # 1. Direct tag in TrackMetadata
         if track.spotify_id and re.fullmatch(r"^[A-Za-z0-9]{22}$", track.spotify_id):
+            set_cached_spotify_id(
+                track.clean_artist or track.artist,
+                track.clean_title or track.title,
+                track.spotify_id,
+                track.isrc,
+            )
             return track.spotify_id
 
-        # 2. Spotify API search if credentials are provided
+        # 2. Fast cache lookup (in-memory dict and SQLite database)
+        cached_id = get_cached_spotify_id(
+            artist=track.clean_artist or track.artist,
+            title=track.clean_title or track.title,
+            isrc=track.isrc,
+        )
+        if cached_id:
+            logger.debug(
+                f"[spicylyrics] Reusing cached Spotify ID '{cached_id}' for '{track.display_name()}'"
+            )
+            track.spotify_id = cached_id
+            return cached_id
+
+        # 3. Spotify API search if credentials are provided
         if self.spotify_client_id and self.spotify_client_secret:
             track_id = await self._search_spotify_api(track)
             if track_id:
+                track.spotify_id = track_id
+                set_cached_spotify_id(
+                    track.clean_artist or track.artist,
+                    track.clean_title or track.title,
+                    track_id,
+                    track.isrc,
+                )
                 return track_id
 
-        # 3. Anonymous Spotify Pathfinder GraphQL search (zero-config, supports ISRC and title+artist)
+        # 4. Anonymous Spotify Pathfinder GraphQL search (zero-config, supports ISRC and title+artist)
         anon_id = await self._search_spotify_anonymous(track)
         if anon_id:
+            track.spotify_id = anon_id
+            set_cached_spotify_id(
+                track.clean_artist or track.artist,
+                track.clean_title or track.title,
+                anon_id,
+                track.isrc,
+            )
             return anon_id
 
-        # 4. MusicBrainz ISRC lookup (free open database fallback)
+        # 5. MusicBrainz ISRC lookup (free open database fallback)
         if track.isrc:
             mb_id = await self._search_musicbrainz_isrc(track.isrc)
             if mb_id:
+                track.spotify_id = mb_id
+                set_cached_spotify_id(
+                    track.clean_artist or track.artist,
+                    track.clean_title or track.title,
+                    mb_id,
+                    track.isrc,
+                )
                 return mb_id
 
         return None
