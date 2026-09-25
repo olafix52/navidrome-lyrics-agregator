@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import threading
 from typing import Dict, Optional, Tuple
-from src.models import LyricsFormat, LyricsResult, StorageMode
+from src.models import LyricsFormat, LyricsResult, LyricsSyncType, StorageMode, detect_sync_type
 from src.tag_writer import embed_lyrics_in_audio, has_embedded_lyrics
 
 logger = logging.getLogger("nla.storage")
@@ -116,6 +116,34 @@ def get_existing_lyrics_file(
             if size > 0:
                 return search_dir / name, fmt
     return None
+
+
+_SYNC_RANK = {
+    LyricsSyncType.WORD_SYNC: 3,
+    LyricsSyncType.LINE_SYNC: 2,
+    LyricsSyncType.UNSYNCED: 1,
+}
+
+
+def lyrics_quality_rank(sync_type: LyricsSyncType, fmt: LyricsFormat) -> Tuple[int, int]:
+    """Comparable quality rank: sync precision first, then container format priority."""
+    return _SYNC_RANK.get(sync_type, 0), fmt.priority
+
+
+def get_existing_lyrics_rank(
+    audio_path: Path,
+    output_dir: Optional[Path] = None,
+) -> Optional[Tuple[int, int]]:
+    """Quality rank of the best existing sidecar for the track, or None if there is none."""
+    existing = get_existing_lyrics_file(audio_path, output_dir=output_dir)
+    if not existing:
+        return None
+    lyrics_path, fmt = existing
+    try:
+        content = lyrics_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return lyrics_quality_rank(detect_sync_type(content, fmt), fmt)
 
 
 def should_skip_track(

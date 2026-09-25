@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def parse_time_string_to_seconds(time_str: str | int | float) -> int:
@@ -43,6 +43,38 @@ class ProviderConfig(BaseModel):
     api_key: Optional[str] = None
     custom_url: Optional[str] = None
     extra: Dict[str, Any] = Field(default_factory=dict)
+
+
+def default_provider_configs() -> Dict[str, ProviderConfig]:
+    """Built-in per-provider settings (rate limits, timeouts, extra options)."""
+    return {
+        "amll": ProviderConfig(rate_limit_per_second=5.0),
+        "apple_music": ProviderConfig(rate_limit_per_second=2.0),
+        "rmmrevival": ProviderConfig(rate_limit_per_second=2.0, timeout_seconds=15.0),
+        "unison": ProviderConfig(rate_limit_per_second=3.0),
+        "spicylyrics": ProviderConfig(rate_limit_per_second=3.0),
+        "binilyrics": ProviderConfig(rate_limit_per_second=3.0),
+        "lrclib": ProviderConfig(rate_limit_per_second=4.0),
+        "musixmatch": ProviderConfig(
+            rate_limit_per_second=2.0,
+            extra={"token_path": "data/musixmatch_token.json"},
+        ),
+        "blend": ProviderConfig(rate_limit_per_second=2.0),
+        "kublend": ProviderConfig(rate_limit_per_second=2.0),
+        "neblend": ProviderConfig(rate_limit_per_second=2.0),
+        "triblend": ProviderConfig(rate_limit_per_second=2.0),
+        "kutriblend": ProviderConfig(rate_limit_per_second=2.0),
+        "qqmusic": ProviderConfig(rate_limit_per_second=3.0),
+        "kuwo": ProviderConfig(rate_limit_per_second=3.0),
+        "netease": ProviderConfig(rate_limit_per_second=3.0),
+        "kugou": ProviderConfig(rate_limit_per_second=3.0),
+        "lyricsify": ProviderConfig(
+            rate_limit_per_second=1.0,
+            timeout_seconds=30.0,
+            extra={"flaresolverr_url": "http://localhost:8191/v1"},
+        ),
+        "genius": ProviderConfig(rate_limit_per_second=1.5),
+    }
 
 
 class NavidromeConfig(BaseModel):
@@ -117,6 +149,12 @@ class AppConfig(BaseModel):
         description="HTTP User-Agent header",
     )
 
+    # Web UI
+    web_auth_token: Optional[str] = Field(
+        default=None,
+        description="Shared secret required by the Web UI/API (open /?token=<token> once in the browser)",
+    )
+
     # Logging
     log_level: str = Field(default="INFO", description="Log level: DEBUG, INFO, WARNING, ERROR")
     log_file: Optional[Path] = Field(default=None, description="Optional path to log file")
@@ -147,37 +185,33 @@ class AppConfig(BaseModel):
         description="Ordered list of active providers (priority order)",
     )
 
-    # Provider specific configurations
-    providers: Dict[str, ProviderConfig] = Field(
-        default_factory=lambda: {
-            "amll": ProviderConfig(rate_limit_per_second=5.0),
-            "apple_music": ProviderConfig(rate_limit_per_second=2.0),
-            "rmmrevival": ProviderConfig(rate_limit_per_second=2.0, timeout_seconds=15.0),
-            "unison": ProviderConfig(rate_limit_per_second=3.0),
-            "spicylyrics": ProviderConfig(rate_limit_per_second=3.0),
-            "binilyrics": ProviderConfig(rate_limit_per_second=3.0),
-            "lrclib": ProviderConfig(rate_limit_per_second=4.0),
-            "musixmatch": ProviderConfig(
-                rate_limit_per_second=2.0,
-                extra={"token_path": "data/musixmatch_token.json"},
-            ),
-            "blend": ProviderConfig(rate_limit_per_second=2.0),
-            "kublend": ProviderConfig(rate_limit_per_second=2.0),
-            "neblend": ProviderConfig(rate_limit_per_second=2.0),
-            "triblend": ProviderConfig(rate_limit_per_second=2.0),
-            "kutriblend": ProviderConfig(rate_limit_per_second=2.0),
-            "qqmusic": ProviderConfig(rate_limit_per_second=3.0),
-            "kuwo": ProviderConfig(rate_limit_per_second=3.0),
-            "netease": ProviderConfig(rate_limit_per_second=3.0),
-            "kugou": ProviderConfig(rate_limit_per_second=3.0),
-            "lyricsify": ProviderConfig(
-                rate_limit_per_second=1.0,
-                timeout_seconds=30.0,
-                extra={"flaresolverr_url": "http://localhost:8191/v1"},
-            ),
-            "genius": ProviderConfig(rate_limit_per_second=1.5),
+    # Provider specific configurations. User-supplied entries (YAML / env) are deep-merged
+    # on top of these defaults instead of replacing the whole mapping.
+    providers: Dict[str, ProviderConfig] = Field(default_factory=lambda: default_provider_configs())
+
+    @field_validator("providers", mode="before")
+    @classmethod
+    def _merge_provider_defaults(cls, value: Any) -> Any:
+        if value is None:
+            return default_provider_configs()
+        if not isinstance(value, dict):
+            return value
+
+        merged: Dict[str, Any] = {
+            name: cfg.model_dump() for name, cfg in default_provider_configs().items()
         }
-    )
+        for name, override in value.items():
+            key = str(name).strip().lower()
+            if override is None:
+                override = {}
+            elif isinstance(override, ProviderConfig):
+                override = override.model_dump(exclude_unset=True)
+
+            if isinstance(override, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge(merged[key], override)
+            else:
+                merged[key] = override
+        return merged
 
     @property
     def scan_interval_seconds(self) -> int:
@@ -210,6 +244,7 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
         "NLA_IGNORE_CACHE": ("ignore_cache", lambda v: v.lower() in ("true", "1", "yes")),
         "IGNORE_CACHE": ("ignore_cache", lambda v: v.lower() in ("true", "1", "yes")),
+        "NLA_WEB_TOKEN": "web_auth_token",
     }
 
     for env_var, target in env_mapping.items():

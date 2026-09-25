@@ -1,5 +1,6 @@
 // Navidrome Lyrics Aggregator - Frontend Client
 import { TTMLRenderer } from "./ttml-renderer.js";
+import { escapeHtml } from "./html-utils.js";
 
 const ttmlRenderer = new TTMLRenderer("lyrics-container");
 
@@ -344,7 +345,7 @@ function renderTracksTable(tracks) {
     // Format badge
     let fmtBadge = `<span class="badge badge-missing">BRAK</span>`;
     if (t.has_lyrics && t.format) {
-      fmtBadge = `<span class="badge badge-${t.format.toLowerCase()}">${t.format.toUpperCase()}</span>`;
+      fmtBadge = `<span class="badge badge-${escapeHtml(t.format.toLowerCase())}">${escapeHtml(t.format.toUpperCase())}</span>`;
     }
 
     // Sync type label
@@ -362,8 +363,8 @@ function renderTracksTable(tracks) {
 
     tr.innerHTML = `
       <td>
-        <div class="track-title" title="${t.filename}">${titleStr}</div>
-        <div class="track-artist">${artistStr}</div>
+        <div class="track-title" title="${escapeHtml(t.filename)}">${escapeHtml(titleStr)}</div>
+        <div class="track-artist">${escapeHtml(artistStr)}</div>
       </td>
       <td>${fmtBadge}</td>
       <td>${syncLabel}</td>
@@ -568,34 +569,36 @@ function appendCandidateCard(cand) {
   const card = document.createElement("div");
   card.className = "candidate-card";
 
-  let syncBadge = `<span class="badge badge-dim">${cand.sync_type}</span>`;
+  let syncBadge = `<span class="badge badge-dim">${escapeHtml(cand.sync_type)}</span>`;
   if (cand.sync_type === "word_sync") {
     syncBadge = `<span class="badge badge-ttml">WORD-SYNC</span>`;
   } else if (cand.sync_type === "line_sync") {
     syncBadge = `<span class="badge badge-lrc">LINE-SYNC</span>`;
   }
 
-  const fmtBadge = `<span class="badge badge-${cand.format.toLowerCase()}">${cand.format.toUpperCase()}</span>`;
+  const fmt = String(cand.format || "");
+  const fmtBadge = `<span class="badge badge-${escapeHtml(fmt.toLowerCase())}">${escapeHtml(fmt.toUpperCase())}</span>`;
   const scorePct = Math.round((cand.match_score || 0) * 100);
 
   card.innerHTML = `
     <div class="candidate-header">
-      <div class="candidate-title">${cand.artist} – ${cand.title}</div>
+      <div class="candidate-title">${escapeHtml(cand.artist)} – ${escapeHtml(cand.title)}</div>
       <div style="display:flex; gap:6px; align-items:center;">
-        <span class="text-dim" style="font-size:0.8rem;">Dostawca: <strong class="text-white">${cand.provider}</strong></span>
+        <span class="text-dim" style="font-size:0.8rem;">Dostawca: <strong class="text-white">${escapeHtml(cand.provider)}</strong></span>
         ${syncBadge}
         ${fmtBadge}
         <span class="badge badge-dim">${scorePct}% trafności</span>
       </div>
     </div>
-    <div class="candidate-preview">${cand.preview}</div>
+    <div class="candidate-preview">${escapeHtml(cand.preview)}</div>
     <div class="candidate-actions">
-      <span class="text-dim" style="font-size:0.8rem;">Czas: ${Math.round(cand.duration || 0)}s</span>
+      <span class="text-dim" style="font-size:0.8rem;">Czas: ${Math.round(Number(cand.duration) || 0)}s</span>
       <button class="btn btn-primary btn-sm apply-btn">✓ Zastosuj tę wersję</button>
     </div>
   `;
 
-  card.querySelector(".apply-btn").addEventListener("click", () => applyCandidateLyrics(cand));
+  const applyBtn = card.querySelector(".apply-btn");
+  applyBtn.addEventListener("click", () => applyCandidateLyrics(cand, applyBtn));
 
   // High quality word-sync versions placed at top
   if (cand.sync_type === "word_sync") {
@@ -605,10 +608,9 @@ function appendCandidateCard(cand) {
   }
 }
 
-async function applyCandidateLyrics(candidate) {
+async function applyCandidateLyrics(candidate, btn) {
   if (!state.currentTrack) return;
 
-  const btn = event.target;
   btn.disabled = true;
   btn.textContent = "Zapisywanie...";
 
@@ -695,7 +697,7 @@ function renderProvidersList() {
       .map((f) => {
         const isWord = f.includes("Word");
         const cls = isWord ? "badge-ttml" : "badge-lrc";
-        return `<span class="badge ${cls}">${f}</span>`;
+        return `<span class="badge ${cls}">${escapeHtml(f)}</span>`;
       })
       .join(" ");
 
@@ -711,12 +713,12 @@ function renderProvidersList() {
       </div>
       <div class="provider-info">
         <div class="provider-title-row">
-          <strong class="provider-name">${prov.name}</strong>
-          <code class="provider-id">${prov.id}</code>
+          <strong class="provider-name">${escapeHtml(prov.name)}</strong>
+          <code class="provider-id">${escapeHtml(prov.id)}</code>
           ${formatsBadges}
           ${apiKeyBadge}
         </div>
-        <div class="provider-desc text-dim text-sm">${prov.description || ""}</div>
+        <div class="provider-desc text-dim text-sm">${escapeHtml(prov.description || "")}</div>
       </div>
       <div class="provider-toggle">
         <label class="switch">

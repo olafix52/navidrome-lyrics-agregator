@@ -249,3 +249,17 @@ async def test_run_upgrade_command_skips_ttml(tmp_path: Path):
     config = AppConfig(music_dir=tmp_path)
     # With dry-run, if no candidates exist, it prints nothing to upgrade and exits cleanly
     await run_upgrade_command(FakeArgs(), config)
+
+
+def test_prune_orphans_ignores_unrelated_txt_and_yaml(tmp_path: Path):
+    """Non-lyrics .txt/.yaml files (release notes, info.txt) must never be pruned as orphans."""
+    (tmp_path / "01 - Song.flac").write_bytes(b"dummy")
+    (tmp_path / "info.txt").write_text("Ripped with EAC", encoding="utf-8")
+    (tmp_path / "notes.yaml").write_text("foo: bar", encoding="utf-8")
+    (tmp_path / "Removed Track.lrc").write_text("[00:01.00]x", encoding="utf-8")
+    (tmp_path / "Removed Track.ttml").write_text("<tt/>", encoding="utf-8")
+    (tmp_path / "Removed Track.lyricsfile.yaml").write_text("lines: []", encoding="utf-8")
+    (tmp_path / "01 - Song.lrc").write_text("[00:01.00]x", encoding="utf-8")
+
+    orphans = {p.name for p in LibraryPruner().find_orphaned_sidecars(tmp_path)}
+    assert orphans == {"Removed Track.lrc", "Removed Track.ttml", "Removed Track.lyricsfile.yaml"}

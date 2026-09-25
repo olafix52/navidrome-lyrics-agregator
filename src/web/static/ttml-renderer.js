@@ -5,6 +5,8 @@
  * instrumental break countdown bars, duets (v1/v2), ad-libs (x-bg), and interactive seeking.
  */
 
+import { escapeHtml, safeUrl } from "./html-utils.js";
+
 export class TTMLRenderer {
   constructor(containerId = "lyrics-container") {
     this.containerId = containerId;
@@ -132,7 +134,7 @@ export class TTMLRenderer {
       container.innerHTML = `
         <div class="empty-state">
           <div class="big">BŁĄD XML</div>
-          <div class="sub">Nie udało się zinterpretować pliku jako XML.<br><em>${xmlErr.textContent.split("\n")[0]}</em></div>
+          <div class="sub">Nie udało się zinterpretować pliku jako XML.<br><em>${escapeHtml(xmlErr.textContent.split("\n")[0])}</em></div>
         </div>`;
       return;
     }
@@ -428,26 +430,28 @@ export class TTMLRenderer {
       attrContainer.className = "lyrics-attribution";
 
       const parts = [];
-      const pName = provider || "Spicy Lyrics";
+      const pName = escapeHtml(provider || "Spicy Lyrics");
       if (source && source.toLowerCase() !== "spicy_lyrics" && source.toLowerCase() !== "unknown") {
-        const formattedSrc = source.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+        const formattedSrc = escapeHtml(source.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()));
         parts.push(`<span class="attr-provider">Dostawca tekstu: <strong>${pName} (${formattedSrc})</strong></span>`);
       } else {
         parts.push(`<span class="attr-provider">Dostawca tekstu: <strong>${pName}</strong></span>`);
       }
 
+      const personLabel = (person) => {
+        const name = escapeHtml(person.username);
+        const href = safeUrl(person.url);
+        return href
+          ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" class="attr-link">${name}</a>`
+          : `<strong>${name}</strong>`;
+      };
+
       if (source === "spicy_lyrics" || (!source && (maker || uploader))) {
         if (maker && maker.username) {
-          const mLabel = maker.url
-            ? `<a href="${maker.url}" target="_blank" rel="noopener noreferrer" class="attr-link">${maker.username}</a>`
-            : `<strong>${maker.username}</strong>`;
-          parts.push(`<span class="attr-maker">Synchronizacja: ${mLabel}</span>`);
+          parts.push(`<span class="attr-maker">Synchronizacja: ${personLabel(maker)}</span>`);
         }
         if (uploader && uploader.username) {
-          const uLabel = uploader.url
-            ? `<a href="${uploader.url}" target="_blank" rel="noopener noreferrer" class="attr-link">${uploader.username}</a>`
-            : `<strong>${uploader.username}</strong>`;
-          parts.push(`<span class="attr-uploader">Przesłane przez: ${uLabel}</span>`);
+          parts.push(`<span class="attr-uploader">Przesłane przez: ${personLabel(uploader)}</span>`);
         }
       }
 

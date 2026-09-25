@@ -19,6 +19,9 @@ logger = logging.getLogger("nla.audit")
 # All recognized lyrics extensions
 ALL_LYRICS_EXTENSIONS = [".ttml", ".lyricsfile.yaml", ".yaml", ".lrc", ".txt"]
 
+# Extensions safe to delete as orphans when no matching audio file exists
+ORPHAN_PRUNABLE_EXTENSIONS = (".ttml", ".lrc", ".lyricsfile.yaml")
+
 
 def get_track_stem_and_format(path: Path) -> Optional[Tuple[str, LyricsFormat]]:
     """Extract audio track base stem and lyrics format from a lyrics sidecar file."""
@@ -317,13 +320,20 @@ class LibraryPruner:
     """Detects and deletes orphaned lyrics files and obsolete duplicate sidecars."""
 
     def find_orphaned_sidecars(self, root_dir: Path) -> List[Path]:
-        """Find lyrics files whose associated audio file no longer exists."""
+        """Find lyrics files whose associated audio file no longer exists.
+
+        Only extensions that are unambiguously lyrics sidecars (.ttml, .lrc, .lyricsfile.yaml)
+        are considered. Plain .txt and .yaml files are commonly unrelated (release notes,
+        info.txt, tool configs), so a missing audio file is not proof they are lyrics.
+        """
         orphans: List[Path] = []
         if not root_dir.exists():
             return orphans
 
         for candidate in root_dir.rglob("*"):
             if not candidate.is_file():
+                continue
+            if not candidate.name.lower().endswith(ORPHAN_PRUNABLE_EXTENSIONS):
                 continue
             parsed = get_track_stem_and_format(candidate)
             if not parsed:

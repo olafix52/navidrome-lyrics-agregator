@@ -193,7 +193,9 @@ python -m src.main ping-navidrome
 python -m src.main trigger-scan
 
 # 12. Launch lightweight Web UI & live karaoke player
-python -m src.main web -p 8080 -d /path/to/music
+python -m src.main web -p 8080 -d /path/to/music        # local only (127.0.0.1)
+# Expose on the network: a token is required (or NLA_WEB_TOKEN); open http://host:8080/?token=<token> once
+python -m src.main web --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 
 # 13. Persistent negative cache management
 python -m src.main cache --stats

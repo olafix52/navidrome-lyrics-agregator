@@ -25,6 +25,9 @@ class NegativeCacheHit:
     last_providers: List[str] = field(default_factory=list)
 
 
+# Negative-cache scope for "an upgrade search found nothing better than the existing sidecar"
+UPGRADE_SCOPE = "upgrade"
+
 _DEFAULT_CACHE_DB_PATH: Path = Path("data/lyrics_cache.db")
 _ACTIVE_CACHE_DB_PATH: Optional[Path] = None
 _SPOTIFY_ID_MEM_CACHE: Dict[str, str] = {}
@@ -262,12 +265,19 @@ class LyricsCache:
             if not self._initialized:
                 await asyncio.to_thread(self._init_db_sync)
 
-    def get_cache_key(self, track: TrackMetadata) -> str:
-        """Generate a deterministic hash key from normalized track metadata."""
+    def get_cache_key(self, track: TrackMetadata, scope: Optional[str] = None) -> str:
+        """Generate a deterministic hash key from normalized track metadata.
+
+        ``scope`` separates independent negative results for the same track, e.g.
+        ``UPGRADE_SCOPE`` = "no better version than the existing sidecar was found",
+        which must not make a lyrics-less copy of the same song get skipped.
+        """
         artist = (track.clean_artist or track.artist or "").strip().lower()
         title = (track.clean_title or track.title or "").strip().lower()
         dur = int(round(track.duration)) if track.duration else 0
         raw = f"{artist}:{title}:{dur}"
+        if scope:
+            raw = f"{scope}|{raw}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _is_negative_hit_sync(self, cache_key: str) -> Optional[NegativeCacheHit]:
@@ -304,10 +314,14 @@ class LyricsCache:
                 last_providers=providers,
             )
 
-    async def is_negative_hit(self, track: TrackMetadata) -> Optional[NegativeCacheHit]:
+    async def is_negative_hit(
+        self,
+        track: TrackMetadata,
+        scope: Optional[str] = None,
+    ) -> Optional[NegativeCacheHit]:
         """Check if track was recorded as having no lyrics within active TTL."""
         await self.initialize()
-        key = self.get_cache_key(track)
+        key = self.get_cache_key(track, scope=scope)
         return await asyncio.to_thread(self._is_negative_hit_sync, key)
 
     def _record_negative_sync(
@@ -345,10 +359,11 @@ class LyricsCache:
         self,
         track: TrackMetadata,
         providers_checked: Optional[List[str]] = None,
+        scope: Optional[str] = None,
     ) -> None:
         """Store or refresh negative lookup record for an unfound track."""
         await self.initialize()
-        key = self.get_cache_key(track)
+        key = self.get_cache_key(track, scope=scope)
         artist = track.clean_artist or track.artist or ""
         title = track.clean_title or track.title or ""
         duration = int(round(track.duration)) if track.duration else 0
@@ -373,10 +388,10 @@ class LyricsCache:
             conn.commit()
             return cursor.rowcount > 0
 
-    async def remove(self, track: TrackMetadata) -> bool:
+    async def remove(self, track: TrackMetadata, scope: Optional[str] = None) -> bool:
         """Remove a track from negative cache (e.g. when lyrics are found or upgraded)."""
         await self.initialize()
-        key = self.get_cache_key(track)
+        key = self.get_cache_key(track, scope=scope)
         return await asyncio.to_thread(self._remove_sync, key)
 
     def _clear_sync(self, expired_only: bool = False) -> int:

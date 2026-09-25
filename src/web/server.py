@@ -1,16 +1,18 @@
 """FastAPI backend application for the Navidrome Lyrics Aggregator Web UI."""
 
 import base64
+import hmac
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from src.audit import LibraryAuditor
 from src.config import AppConfig
@@ -25,6 +27,43 @@ from src.web.parser import karaoke_to_ttml, parse_lyrics_to_karaoke
 logger = logging.getLogger("nla.web")
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+AUTH_COOKIE_NAME = "nla_token"
+AUTH_HEADER_NAME = "x-nla-token"
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+LOOPBACK_HOSTS = ["localhost", "127.0.0.1"]
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return True if the bind address only accepts local connections."""
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
+def _is_cross_origin(request: Request) -> bool:
+    """Detect browser requests issued by a different origin (CSRF from other websites)."""
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return True
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    if origin == "null":
+        return True
+    return urlsplit(origin).netloc.lower() != request.headers.get("host", "").lower()
+
+
+def _request_token(request: Request) -> Optional[str]:
+    """Extract the auth token from header, bearer authorization, or session cookie."""
+    token = request.headers.get(AUTH_HEADER_NAME)
+    if token:
+        return token
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.cookies.get(AUTH_COOKIE_NAME)
+
+
+def _token_matches(provided: Optional[str], expected: str) -> bool:
+    return bool(provided) and hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
 def encode_track_id(audio_path: Path, music_dir: Path) -> str:
@@ -59,21 +98,62 @@ class UpdateProvidersRequest(BaseModel):
     persist: Optional[bool] = True
 
 
-def create_app(config: AppConfig, matcher: Optional[LyricsMatcher] = None) -> FastAPI:
-    """Create and configure the FastAPI web application."""
+def create_app(
+    config: AppConfig,
+    matcher: Optional[LyricsMatcher] = None,
+    trusted_hosts: Optional[List[str]] = None,
+) -> FastAPI:
+    """Create and configure the FastAPI web application.
+
+    Security model:
+      - No CORS headers are sent, so other websites cannot read API responses.
+      - State-changing requests (POST, ...) coming from another origin are rejected.
+      - If ``config.web_auth_token`` is set, every request except static assets must carry
+        the token (``X-NLA-Token`` header, ``Authorization: Bearer``, or the session cookie
+        obtained by opening ``/?token=<token>`` once).
+      - ``trusted_hosts`` restricts accepted Host headers (protects loopback-only servers
+        against DNS rebinding).
+    """
     app = FastAPI(
         title="Navidrome Lyrics Aggregator - Web UI",
         description="Lightweight dashboard for coverage charts, live karaoke player, and provider search",
         version="1.0.0",
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    @app.middleware("http")
+    async def security_guard(request: Request, call_next):
+        if request.method not in SAFE_METHODS and _is_cross_origin(request):
+            return JSONResponse(status_code=403, content={"detail": "Cross-origin request rejected"})
+
+        expected_token = app.state.config.web_auth_token
+        path = request.url.path
+        if expected_token and not path.startswith("/static/"):
+            if path == "/" and request.query_params.get("token") is not None:
+                if _token_matches(request.query_params.get("token"), expected_token):
+                    response = RedirectResponse(url="/", status_code=303)
+                    response.set_cookie(
+                        AUTH_COOKIE_NAME,
+                        expected_token,
+                        httponly=True,
+                        samesite="strict",
+                        secure=request.url.scheme == "https",
+                    )
+                    return response
+                return PlainTextResponse("Invalid token.", status_code=401)
+
+            if not _token_matches(_request_token(request), expected_token):
+                if path == "/":
+                    return PlainTextResponse(
+                        "Authentication required: open this page as /?token=<your NLA web token>.",
+                        status_code=401,
+                    )
+                return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+        return await call_next(request)
+
+    if trusted_hosts:
+        # Added last so it runs first (outermost middleware)
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
     # Ensure static directory exists
     STATIC_DIR.mkdir(parents=True, exist_ok=True)

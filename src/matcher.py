@@ -4,17 +4,24 @@ import asyncio
 import logging
 import time
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Tuple, TypeVar
-from src.cache import LyricsCache, get_cached_spotify_id
+from src.cache import UPGRADE_SCOPE, LyricsCache, get_cached_spotify_id
 from src.config import AppConfig
 from src.models import (
     LyricsSyncType,
     MatchStatus,
     ProcessResult,
+    StorageMode,
     TrackMetadata,
 )
 from src.normalizer import verify_track_match
 from src.providers.base import BaseLyricsProvider
-from src.storage import save_lyrics_for_track, should_skip_track
+from src.storage import (
+    get_existing_lyrics_rank,
+    lyrics_quality_rank,
+    save_lyrics_for_track,
+    should_skip_track,
+)
+from src.tag_writer import has_embedded_lyrics
 
 logger = logging.getLogger("nla.matcher")
 
@@ -86,12 +93,12 @@ class LyricsMatcher:
         self._single_flight = SingleFlight()
 
     async def _fetch_best_lyrics(
-        self, track: TrackMetadata
+        self, track: TrackMetadata, cache_scope: Optional[str] = None
     ) -> Tuple[Optional[Tuple[Any, str, float]], List[str], bool, Tuple[float, int]]:
         """Fetch best lyrics from providers cascade without performing disk I/O."""
         ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
         if self.cache and not ignore_cache:
-            hit = await self.cache.is_negative_hit(track)
+            hit = await self.cache.is_negative_hit(track, scope=cache_scope)
             if hit:
                 return None, [], True, (hit.remaining_days, hit.failure_count)
 
@@ -198,8 +205,17 @@ class LyricsMatcher:
                 error_message=skip_reason,
             )
 
+        # When lyrics already exist (upgrade attempt), a result is only written if it is
+        # strictly better. Otherwise every scan would re-download and rewrite the same
+        # LRC, report SUCCESS and re-trigger Navidrome scans (and, with embedded tags,
+        # retrigger the file watcher in an endless loop).
+        storage_mode = str(getattr(self.config, "storage_mode", "sidecar")).lower()
+        existing_rank, tags_missing = await asyncio.to_thread(self._existing_lyrics_state, track, storage_mode)
+        cache_scope = UPGRADE_SCOPE if existing_rank is not None else None
+
         # SingleFlight: coalesce concurrent in-flight queries for identical tracks
         flight_key = (
+            f"{cache_scope or 'missing'}:"
             f"{(track.clean_artist or track.artist).strip().lower()}:"
             f"{(track.clean_title or track.title).strip().lower()}:"
             f"{int(round(track.duration or 0))}"
@@ -207,34 +223,58 @@ class LyricsMatcher:
 
         best_match, providers_queried, is_negative_hit, neg_hit_info = await self._single_flight.execute(
             flight_key,
-            lambda: self._fetch_best_lyrics(track),
+            lambda: self._fetch_best_lyrics(track, cache_scope=cache_scope),
         )
 
         if is_negative_hit:
             remaining_days, failure_count = neg_hit_info
+            what = "no better lyrics than existing sidecar" if cache_scope else "no lyrics"
             logger.debug(
-                f"[CACHE HIT - NEGATIVE] {track.display_name()} - skipped (no lyrics found on previous scan, "
+                f"[CACHE HIT - NEGATIVE] {track.display_name()} - skipped ({what} found on previous scan, "
                 f"TTL remaining: {remaining_days:.1f}d, fail count: {failure_count})"
             )
             return ProcessResult(
                 file_path=track.file_path,
                 status=MatchStatus.SKIPPED,
-                error_message=f"Negative cache: no lyrics found across providers ({remaining_days:.1f}d remaining)",
+                error_message=f"Negative cache: {what} found across providers ({remaining_days:.1f}d remaining)",
             )
+
+        ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
 
         if best_match:
             lyrics, provider_name, score = best_match
 
+            save_mode = storage_mode
+            if existing_rank is not None and lyrics_quality_rank(lyrics.sync_type, lyrics.format) <= existing_rank:
+                if not tags_missing:
+                    logger.info(
+                        f"[NO UPGRADE] {track.display_name()} - best result ({lyrics.format.value.upper()}, "
+                        f"{lyrics.sync_type.value} via {provider_name}) is not better than the existing sidecar"
+                    )
+                    if self.cache and not ignore_cache and providers_queried:
+                        await self.cache.record_negative(
+                            track, providers_checked=providers_queried, scope=UPGRADE_SCOPE
+                        )
+                    return ProcessResult(
+                        file_path=track.file_path,
+                        status=MatchStatus.SKIPPED,
+                        error_message="No higher-quality lyrics found than the existing sidecar",
+                    )
+                # 'both' mode with missing tags: keep the existing (better or equal) sidecar,
+                # only populate the audio tags.
+                save_mode = StorageMode.EMBEDDED.value
+
             # Remove from negative cache if previously cached
             if self.cache:
                 await self.cache.remove(track)
+                await self.cache.remove(track, scope=UPGRADE_SCOPE)
 
             # Offload blocking sidecar and audio tag file writes to worker thread
             target_path, was_embedded = await asyncio.to_thread(
                 save_lyrics_for_track,
                 audio_path=track.file_path,
                 lyrics=lyrics,
-                storage_mode=getattr(self.config, "storage_mode", "sidecar"),
+                storage_mode=save_mode,
                 output_dir=getattr(self.config, "output_dir", None),
                 dry_run=self.config.dry_run,
                 enhanced_lrc=getattr(self.config, "embed_word_sync", True),
@@ -263,15 +303,30 @@ class LyricsMatcher:
             )
 
         # Record in negative cache so subsequent scans skip this track immediately
-        ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
         if self.cache and not ignore_cache and providers_queried:
-            await self.cache.record_negative(track, providers_checked=providers_queried)
+            await self.cache.record_negative(track, providers_checked=providers_queried, scope=cache_scope)
 
         logger.info(f"[NOT FOUND] No matching lyrics found for {track.display_name()}")
         return ProcessResult(
             file_path=track.file_path,
             status=MatchStatus.NOT_FOUND,
         )
+
+    def _existing_lyrics_state(
+        self, track: TrackMetadata, storage_mode: str
+    ) -> Tuple[Optional[Tuple[int, int]], bool]:
+        """Return (quality rank of existing sidecar or None, whether 'both' mode still lacks tags).
+
+        Returns (None, False) when results should always be saved (overwrite, embedded-only mode,
+        or no existing sidecar).
+        """
+        if self.config.overwrite or storage_mode not in (StorageMode.SIDECAR.value, StorageMode.BOTH.value):
+            return None, False
+        rank = get_existing_lyrics_rank(track.file_path, output_dir=self.config.output_dir)
+        if rank is None:
+            return None, False
+        tags_missing = storage_mode == StorageMode.BOTH.value and not has_embedded_lyrics(track.file_path)
+        return rank, tags_missing
 
     async def stream_provider_search(
         self,

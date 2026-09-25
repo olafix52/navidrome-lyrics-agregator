@@ -193,7 +193,9 @@ python -m src.main ping-navidrome
 python -m src.main trigger-scan
 
 # 12. Uruchomienie minimalistycznego panelu Web UI i odtwarzacza karaoke
-python -m src.main web -p 8080 -d /ścieżka/do/muzyki
+python -m src.main web -p 8080 -d /ścieżka/do/muzyki   # tylko lokalnie (127.0.0.1)
+# Udostępnienie w sieci wymaga tokena (lub NLA_WEB_TOKEN); otwórz raz http://host:8080/?token=<token>
+python -m src.main web --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 
 # 13. Zarządzanie trwałym negatywnym cache'em SQLite
 python -m src.main cache --stats

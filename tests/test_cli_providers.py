@@ -93,3 +93,51 @@ def test_run_providers_command_enable_and_disable(tmp_path: Path):
     content2 = config_file.read_text(encoding="utf-8")
     assert '- "spicylyrics"' not in content2
     assert '- "lrclib"' in content2
+
+
+def test_global_options_before_subcommand_are_kept():
+    """Options given before the subcommand must not be reset by the subcommand's defaults."""
+    parser = build_parser()
+
+    args = parser.parse_args(["-P", "lrclib", "-d", "/music", "scan"])
+    assert args.providers == "lrclib"
+    assert args.music_dir == "/music"
+
+    args = parser.parse_args(["--disable-providers", "genius", "daemon"])
+    assert args.disable_providers == "genius"
+
+    # Subcommand-level values still work and win
+    args = parser.parse_args(["-d", "/a", "audit", "-d", "/b"])
+    assert args.music_dir == "/b"
+
+    # Nothing given -> attributes behave as unset
+    args = parser.parse_args(["scan"])
+    assert getattr(args, "providers", None) is None
+    assert args.music_dir is None
+
+
+def test_provider_config_overrides_merge_with_defaults(monkeypatch, tmp_path: Path):
+    """Configuring one provider (YAML or env) must not wipe other providers' defaults."""
+    from src.config import ProviderConfig, load_config
+
+    monkeypatch.chdir(tmp_path)  # no config.yaml / config.local.yaml
+    monkeypatch.setenv("SPICY_LYRICS_SECRET_KEY", "sl_sk_test")
+    config = load_config()
+    assert config.providers["spicylyrics"].api_key == "sl_sk_test"
+    assert config.providers["spicylyrics"].rate_limit_per_second == 3.0
+    assert config.providers["lyricsify"].extra["flaresolverr_url"] == "http://localhost:8191/v1"
+    assert config.providers["musixmatch"].extra["token_path"] == "data/musixmatch_token.json"
+    assert config.providers["rmmrevival"].timeout_seconds == 15.0
+
+    partial = AppConfig(providers={
+        "lrclib": {"rate_limit_per_second": 1.0},
+        "lyricsify": {"extra": {"cookie": "x"}},
+        "genius": None,
+        "amll": ProviderConfig(enabled=False),
+    })
+    assert partial.providers["lrclib"].rate_limit_per_second == 1.0
+    assert partial.providers["lyricsify"].extra == {"flaresolverr_url": "http://localhost:8191/v1", "cookie": "x"}
+    assert partial.providers["genius"].rate_limit_per_second == 1.5
+    assert partial.providers["amll"].enabled is False
+    assert partial.providers["amll"].rate_limit_per_second == 5.0
+    assert "kugou" in partial.providers

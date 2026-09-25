@@ -412,19 +412,36 @@ async def run_prune_command(args: argparse.Namespace, config) -> None:
 async def run_web_command(args: argparse.Namespace, config) -> None:
     """Launch the Web UI dashboard and live karaoke player server."""
     import uvicorn
-    from src.web.server import create_app
+    from src.web.server import LOOPBACK_HOSTS, create_app, is_loopback_host
 
     if getattr(args, "music_dir", None):
         config.music_dir = Path(args.music_dir)
     elif getattr(args, "path", None):
         config.music_dir = Path(args.path)
+    if getattr(args, "token", None):
+        config.web_auth_token = args.token
 
-    host = getattr(args, "host", "0.0.0.0") or "0.0.0.0"
+    host = getattr(args, "host", None) or "127.0.0.1"
     port = getattr(args, "port", 8080) or 8080
+    loopback = is_loopback_host(host)
 
-    app = create_app(config)
+    if not loopback and not config.web_auth_token and not getattr(args, "allow_unauthenticated", False):
+        console.print(
+            f"[bold red]Refusing to expose the Web UI on {host} without authentication.[/bold red]\n"
+            "The API can overwrite lyrics files and your config. Set a token with [cyan]--token[/cyan] "
+            "(or NLA_WEB_TOKEN), or pass [cyan]--allow-unauthenticated[/cyan] if the network is trusted."
+        )
+        return
+
+    # Without a token, a loopback-only server must also reject foreign Host headers (DNS rebinding)
+    trusted_hosts = LOOPBACK_HOSTS if (loopback and not config.web_auth_token) else None
+    app = create_app(config, trusted_hosts=trusted_hosts)
 
     console.print(f"[bold green]Starting Web UI & Karaoke Dashboard at:[/bold green] http://{host}:{port}")
+    if config.web_auth_token:
+        console.print("[dim]Authentication enabled - open[/dim] [cyan]/?token=<token>[/cyan] [dim]once to sign in.[/dim]")
+    elif not loopback:
+        console.print("[bold yellow]Warning: Web UI is reachable from the network without authentication.[/bold yellow]")
     console.print(f"[dim]Serving music library from:[/dim] {config.music_dir}")
 
     server_config = uvicorn.Config(
@@ -552,24 +569,29 @@ def run_providers_command(args, config: AppConfig, config_path: Optional[Path]) 
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build command line argument parser."""
+    """Build command line argument parser.
+
+    Options shared between the top-level parser and subcommands use ``argparse.SUPPRESS``
+    as default: otherwise the subparser's default would overwrite a value given before
+    the subcommand (e.g. ``-P lrclib scan`` or ``-d /music scan``).
+    """
     provider_parent = argparse.ArgumentParser(add_help=False)
     provider_parent.add_argument(
         "--providers", "-P",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Comma-separated list of enabled providers (e.g. 'spicylyrics,lrclib')",
     )
     provider_parent.add_argument(
         "--disable-providers",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Comma-separated list of providers to disable (e.g. 'genius,lyricsify')",
     )
     provider_parent.add_argument(
         "--enable-providers",
         type=str,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Comma-separated list of providers to enable",
     )
 
@@ -617,7 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p = subparsers.add_parser("scan", parents=[provider_parent, cache_parent], help="Run a one-time scan of the music library")
     scan_p.add_argument("path", nargs="?", type=str, help="Target folder or file to scan (positional)")
     scan_p.add_argument("-t", "--target", type=str, help="Specific target folder or audio file to scan")
-    scan_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    scan_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
     scan_p.add_argument("-f", "--force", "--overwrite", dest="force", action="store_true", help="Force re-fetching and overwrite existing lyrics")
     scan_p.add_argument("--dry-run", action="store_true", help="Simulate scan without writing files")
     scan_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
@@ -635,7 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # DAEMON subcommand
     daemon_p = subparsers.add_parser("daemon", parents=[provider_parent, cache_parent], help="Run in daemon mode with periodic scans")
-    daemon_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    daemon_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
     daemon_p.add_argument("-i", "--interval", type=str, help="Scan interval (e.g. '1h', '30m', '3600')")
     daemon_p.add_argument("-w", "--with-watch", action="store_true", help="Enable real-time watchdog along with periodic scans")
     daemon_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
@@ -650,7 +672,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # WATCH subcommand
     watch_p = subparsers.add_parser("watch", parents=[provider_parent, cache_parent], help="Watch music directory and fetch lyrics on file events")
-    watch_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    watch_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
     watch_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     watch_p.add_argument("--storage-mode", type=str, choices=["sidecar", "embedded", "both"], help="Storage destination: sidecar, embedded, or both")
     watch_p.add_argument("--fast-line-sync", "--early-exit-line-sync", dest="fast_line_sync", action="store_true", help="Exit cascade immediately upon matching line-synced lyrics without searching for word-sync")
@@ -669,7 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     for cmd_name in ["audit", "stats"]:
         audit_p = subparsers.add_parser(cmd_name, help="Analyze library lyrics coverage and formats offline")
         audit_p.add_argument("path", nargs="?", type=str, help="Target folder or file to audit (positional)")
-        audit_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+        audit_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
         audit_p.add_argument("--export-missing", type=str, help="Export missing tracks to JSON or CSV file")
         audit_p.add_argument("--export-report", type=str, help="Export full audit report to JSON or CSV file")
         audit_p.add_argument(
@@ -684,7 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
     # UPGRADE subcommand
     upgrade_p = subparsers.add_parser("upgrade", parents=[provider_parent, cache_parent], help="Fetch word-sync TTML lyrics for tracks lacking them")
     upgrade_p.add_argument("path", nargs="?", type=str, help="Target folder or file to upgrade (positional)")
-    upgrade_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    upgrade_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
     upgrade_p.add_argument("--only-lrc", action="store_true", help="Only upgrade tracks that already have line-sync/plain lyrics")
     upgrade_p.add_argument("--only-missing", action="store_true", help="Only download lyrics for tracks with no lyrics at all")
     upgrade_p.add_argument("-f", "--force", action="store_true", help="Force re-fetching even if TTML already exists")
@@ -706,7 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
     # PRUNE subcommand
     prune_p = subparsers.add_parser("prune", help="Clean up orphaned sidecars and obsolete duplicate formats")
     prune_p.add_argument("path", nargs="?", type=str, help="Target folder to prune (positional)")
-    prune_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+    prune_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
     prune_p.add_argument("--dry-run", action="store_true", help="Simulate prune without deleting files (default)")
     prune_p.add_argument("-f", "--force", action="store_true", help="Perform actual deletion of files")
     prune_p.add_argument("--orphans-only", action="store_true", help="Only delete orphaned sidecars without audio")
@@ -729,9 +751,25 @@ def build_parser() -> argparse.ArgumentParser:
     for cmd_name in ["web", "dashboard"]:
         web_p = subparsers.add_parser(cmd_name, parents=[provider_parent], help="Launch lightweight Web UI dashboard and live karaoke player")
         web_p.add_argument("path", nargs="?", type=str, help="Root music directory (positional)")
-        web_p.add_argument("-d", "--music-dir", type=str, help="Root music directory (overrides config)")
+        web_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
         web_p.add_argument("-p", "--port", type=int, default=8080, help="Web server port (default: 8080)")
-        web_p.add_argument("--host", type=str, default="0.0.0.0", help="Web server host (default: 0.0.0.0)")
+        web_p.add_argument(
+            "--host",
+            type=str,
+            default="127.0.0.1",
+            help="Web server bind address (default: 127.0.0.1). Non-loopback addresses require --token.",
+        )
+        web_p.add_argument(
+            "--token",
+            type=str,
+            default=None,
+            help="Access token for the Web UI/API (or NLA_WEB_TOKEN). Open /?token=<token> once in the browser.",
+        )
+        web_p.add_argument(
+            "--allow-unauthenticated",
+            action="store_true",
+            help="Allow binding to a non-loopback address without a token (anyone on the network gets full access)",
+        )
 
     # PROVIDERS subcommand
     providers_p = subparsers.add_parser("providers", help="List, enable, or disable lyrics providers")

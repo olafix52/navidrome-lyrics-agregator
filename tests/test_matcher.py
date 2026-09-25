@@ -487,3 +487,113 @@ async def test_matcher_single_flight_duplicate_tracks(tmp_path: Path):
     assert (tmp_path / "song2.lrc").exists()
 
 
+
+
+def _lrc_result(content: str = "[00:10.00]Hello world") -> LyricsResult:
+    return LyricsResult(
+        content=content,
+        format=LyricsFormat.LRC,
+        sync_type=LyricsSyncType.LINE_SYNC,
+        provider_name="p1",
+        duration=200.0,
+        title="Song",
+        artist="Artist",
+    )
+
+
+@pytest.mark.asyncio
+async def test_upgrade_does_not_rewrite_equal_quality_lyrics(tmp_path: Path):
+    """An existing LRC must not be re-downloaded/rewritten every scan when nothing better exists."""
+    from src.cache import LyricsCache
+
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    existing = tmp_path / "song.lrc"
+    existing.write_text("[00:10.00]My own edited line\n", encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    calls = 0
+    p1 = MockProvider("p1", _lrc_result())
+    orig = p1.get_lyrics
+
+    async def counted(t):
+        nonlocal calls
+        calls += 1
+        return await orig(t)
+
+    p1.get_lyrics = counted
+
+    cache = LyricsCache(db_path=tmp_path / "cache.db", ttl_days=7.0)
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path), [p1], cache=cache)
+
+    res1 = await matcher.process_track(track)
+    assert res1.status == MatchStatus.SKIPPED
+    assert existing.read_text(encoding="utf-8") == "[00:10.00]My own edited line\n"
+    assert calls == 1
+
+    # Next scan: remembered in the upgrade scope -> no provider query at all
+    res2 = await matcher.process_track(track)
+    assert res2.status == MatchStatus.SKIPPED
+    assert calls == 1
+
+    # The upgrade-scope entry must not affect a copy of the same song that has no lyrics
+    other_audio = tmp_path / "copy" / "song.mp3"
+    other_audio.parent.mkdir()
+    other_audio.write_bytes(b"dummy")
+    other = TrackMetadata(file_path=other_audio, title="Song", artist="Artist", duration=200.0)
+    res3 = await matcher.process_track(other)
+    assert res3.status == MatchStatus.SUCCESS
+    assert (other_audio.parent / "song.lrc").exists()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_writes_strictly_better_lyrics(tmp_path: Path):
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    (tmp_path / "song.lrc").write_text("[00:10.00]Hello world\n", encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    ttml = LyricsResult(
+        content='<tt xmlns="http://www.w3.org/ns/ttml"><body><p begin="00:10.000" end="00:12.000">'
+                '<span begin="00:10.000" end="00:11.000">Hello</span></p></body></tt>',
+        format=LyricsFormat.TTML,
+        sync_type=LyricsSyncType.WORD_SYNC,
+        provider_name="p1",
+        duration=200.0,
+        title="Song",
+        artist="Artist",
+    )
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, cache={"enabled": False}), [MockProvider("p1", ttml)])
+
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert (tmp_path / "song.ttml").exists()
+    assert not (tmp_path / "song.lrc").exists()  # lower-quality sidecar replaced
+
+
+@pytest.mark.asyncio
+async def test_unsynced_existing_lrc_upgraded_by_line_sync(tmp_path: Path):
+    """An .lrc without timestamps ranks below a real line-synced LRC."""
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    (tmp_path / "song.lrc").write_text("Hello world\n", encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, cache={"enabled": False}), [MockProvider("p1", _lrc_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert (tmp_path / "song.lrc").read_text(encoding="utf-8").startswith("[00:10.00]")
+
+
+@pytest.mark.asyncio
+async def test_overwrite_still_rewrites_equal_quality(tmp_path: Path):
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    (tmp_path / "song.lrc").write_text("[00:10.00]Old\n", encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    config = AppConfig(music_dir=tmp_path, overwrite=True, cache={"enabled": False})
+    matcher = LyricsMatcher(config, [MockProvider("p1", _lrc_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert "Hello world" in (tmp_path / "song.lrc").read_text(encoding="utf-8")

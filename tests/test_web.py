@@ -526,3 +526,109 @@ async def test_api_cache_endpoints(tmp_path: Path):
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Web security: CSRF, token auth, trusted hosts, frontend escaping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_cors_and_cross_origin_writes_rejected(tmp_path: Path):
+    """Other websites must not be able to read API responses or trigger state changes."""
+    config = AppConfig(music_dir=tmp_path)
+    app = create_app(config)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.get("/api/providers", headers={"Origin": "https://evil.example"})
+        assert "access-control-allow-origin" not in res.headers
+
+        res = await client.post("/api/cache/clear", headers={"Origin": "https://evil.example"})
+        assert res.status_code == 403
+
+        res = await client.post("/api/cache/clear", headers={"Sec-Fetch-Site": "cross-site"})
+        assert res.status_code == 403
+
+        # Same-origin browser request and non-browser clients (no Origin) are allowed
+        res = await client.post("/api/cache/clear", headers={"Origin": "http://test"})
+        assert res.status_code == 200
+        res = await client.post("/api/cache/clear")
+        assert res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_token_auth_required_when_configured(tmp_path: Path):
+    config = AppConfig(music_dir=tmp_path, web_auth_token="s3cret")
+    app = create_app(config)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get("/api/providers")).status_code == 401
+        assert (await client.get("/")).status_code == 401
+        assert (await client.get("/api/providers", headers={"X-NLA-Token": "wrong"})).status_code == 401
+        assert (await client.get("/api/providers", headers={"X-NLA-Token": "s3cret"})).status_code == 200
+        assert (await client.get("/api/providers", headers={"Authorization": "Bearer s3cret"})).status_code == 200
+
+        # Static assets stay public
+        assert (await client.get("/static/html-utils.js")).status_code == 200
+
+        # Wrong login token
+        assert (await client.get("/?token=nope")).status_code == 401
+
+        # Login via /?token= sets an HttpOnly session cookie used by subsequent requests
+        login = await client.get("/?token=s3cret")
+        assert login.status_code == 303
+        set_cookie = login.headers["set-cookie"].lower()
+        assert "httponly" in set_cookie and "samesite=strict" in set_cookie
+        assert (await client.get("/api/providers")).status_code == 200
+        assert (await client.get("/")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_trusted_hosts_block_dns_rebinding(tmp_path: Path):
+    config = AppConfig(music_dir=tmp_path)
+    app = create_app(config, trusted_hosts=["localhost", "127.0.0.1"])
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://evil.example") as client:
+        assert (await client.get("/api/providers")).status_code == 400
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8080") as client:
+        assert (await client.get("/api/providers")).status_code == 200
+
+
+def test_web_command_refuses_public_bind_without_token(tmp_path: Path, monkeypatch):
+    """Binding to a network interface without a token must not start the server."""
+    import asyncio
+    import argparse
+    import uvicorn
+    from src.main import run_web_command
+
+    started = []
+    monkeypatch.setattr(uvicorn.Server, "serve", lambda self: started.append(self) or asyncio.sleep(0))
+
+    base = dict(music_dir=str(tmp_path), path=None, port=8080, token=None, allow_unauthenticated=False)
+
+    asyncio.run(run_web_command(argparse.Namespace(host="0.0.0.0", **base), AppConfig(music_dir=tmp_path)))
+    assert started == []
+
+    asyncio.run(run_web_command(argparse.Namespace(host="127.0.0.1", **base), AppConfig(music_dir=tmp_path)))
+    assert len(started) == 1
+
+    with_token = {**base, "token": "abc"}
+    asyncio.run(run_web_command(argparse.Namespace(host="0.0.0.0", **with_token), AppConfig(music_dir=tmp_path)))
+    assert len(started) == 2
+
+
+def test_frontend_escapes_untrusted_values():
+    """Provider/tag data must be escaped before being placed in innerHTML templates."""
+    static = Path(__file__).resolve().parent.parent / "src" / "web" / "static"
+    app_js = (static / "app.js").read_text(encoding="utf-8")
+    renderer_js = (static / "ttml-renderer.js").read_text(encoding="utf-8")
+
+    for raw in ("${cand.preview}", "${cand.artist}", "${cand.title}", "${titleStr}", "${artistStr}", "${prov.description"):
+        assert raw not in app_js, f"unescaped interpolation {raw} in app.js"
+    for raw in ('href="${maker.url}"', 'href="${uploader.url}"', "${maker.username}", "${uploader.username}"):
+        assert raw not in renderer_js, f"unescaped interpolation {raw} in ttml-renderer.js"
+    assert 'escapeHtml(provider || "Spicy Lyrics")' in renderer_js
+    assert "safeUrl(person.url)" in renderer_js
