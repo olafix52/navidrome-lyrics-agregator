@@ -13,6 +13,7 @@ from src.logger import console
 from src.matcher import LyricsMatcher
 from src.models import MatchStatus, ProcessResult, TrackMetadata
 from src.normalizer import clean_artist, clean_title
+from src.storage import should_skip_track
 from src.subsonic import SubsonicClient
 from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, iter_discover_audio_files, read_track_metadata
 
@@ -25,7 +26,6 @@ class LibraryScanner:
     def __init__(self, config: AppConfig, matcher: LyricsMatcher):
         self.config = config
         self.matcher = matcher
-        self.semaphore = asyncio.Semaphore(max(1, config.concurrency))
 
     def discover_audio_files(self, root_dir: Path) -> List[Path]:
         """Find all supported audio files in the target directory recursively using fast os.scandir."""
@@ -178,8 +178,13 @@ class LibraryScanner:
                 if st.lyrics_present and not self.config.overwrite:
                     continue
 
-                dest_base = self.config.output_dir if self.config.output_dir else self.config.music_dir
-                track_file = dest_base / st.path.lstrip("/\\") if st.path else dest_base / f"{st.artist} - {st.title}.{st.suffix}"
+                # The audio path is always relative to the library root; where sidecars go
+                # (next to it or mirrored below output_dir) is decided by the storage layer.
+                music_dir = self.config.music_dir
+                track_file = music_dir / st.path.lstrip("/\\") if st.path else music_dir / f"{st.artist} - {st.title}.{st.suffix}"
+                if ".." in track_file.relative_to(music_dir).parts:
+                    logger.warning(f"Ignoring Subsonic track with path outside the library: {st.path!r}")
+                    continue
 
                 meta = TrackMetadata(
                     file_path=track_file,
@@ -323,6 +328,25 @@ class LibraryScanner:
 
     async def _process_single_file(self, file_path: Path) -> ProcessResult:
         """Read metadata and invoke lyrics matcher on a single file."""
+        # Cheap pre-check first: tracks that already have lyrics are skipped without
+        # parsing their audio tags (sidecar mode needs only a cached directory listing).
+        skip, skip_reason = await asyncio.to_thread(
+            should_skip_track,
+            file_path,
+            overwrite=self.config.overwrite,
+            upgrade_quality=self.config.upgrade_quality,
+            storage_mode=self.config.storage_mode,
+            output_dir=self.config.output_dir,
+            music_dir=self.config.music_dir,
+        )
+        if skip:
+            logger.debug(f"[SKIPPED] {file_path.name} - {skip_reason}")
+            return ProcessResult(
+                file_path=file_path,
+                status=MatchStatus.SKIPPED,
+                error_message=skip_reason,
+            )
+
         metadata = await asyncio.to_thread(read_track_metadata, file_path)
         if not metadata:
             return ProcessResult(

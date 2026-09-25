@@ -3,6 +3,8 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional
 import httpx
 
@@ -11,6 +13,33 @@ from src.models import LyricsResult, TrackMetadata
 from src.rate_limiter import AsyncRateLimiter
 
 logger = logging.getLogger("nla.providers")
+
+# Transient HTTP statuses worth retrying; every other 4xx fails immediately
+RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+# Longest server-requested 429 back-off we are willing to wait inside a request
+MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential back-off: 1s, 2s, 4s, ... capped at 8s."""
+    return min(8.0, float(2 ** (attempt - 1)))
+
+
+def _parse_retry_after(value: Optional[str], default: float) -> float:
+    """Parse a Retry-After header given as delay-seconds or HTTP-date."""
+    if not value:
+        return default
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, IndexError):
+        return default
 
 try:
     import h2
@@ -72,10 +101,17 @@ class BaseLyricsProvider(ABC):
         json: Optional[Any] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Optional[httpx.Response]:
-        """Perform an HTTP request with rate limiting and exponential backoff retry."""
+        """Perform an HTTP request with rate limiting and exponential backoff retry.
+
+        Only transient failures are retried: network errors, 408/425/429 and 5xx responses.
+        Other client errors (400, 401, 403, ...) cannot succeed on retry and return None
+        immediately. A 429 whose Retry-After exceeds ``MAX_RETRY_AFTER_SECONDS`` gives up
+        instead of blocking a worker for (potentially) hours.
+        """
         client = await self.get_client()
 
         for attempt in range(1, self.max_retries + 1):
+            is_last = attempt == self.max_retries
             await self.rate_limiter.acquire()
             try:
                 response = await client.request(
@@ -86,36 +122,40 @@ class BaseLyricsProvider(ABC):
                     json=json,
                     headers=headers,
                 )
-
-                # If rate limited by remote server (429), wait and retry
-                if response.status_code == 429:
-                    raw_retry = response.headers.get("Retry-After", "")
-                    try:
-                        retry_after = float(raw_retry)
-                    except (ValueError, TypeError):
-                        retry_after = 2.0 * attempt
-                    logger.warning(f"[{self.name}] Rate limited (429), waiting {retry_after}s...")
-                    await asyncio.sleep(retry_after)
-                    continue
-
-                if response.status_code == 404:
-                    return None
-
-                response.raise_for_status()
-                return response
-
-            except httpx.HTTPStatusError as e:
-                logger.debug(f"[{self.name}] HTTP status {e.response.status_code} on {url}: {e}")
-                if attempt == self.max_retries:
-                    return None
-            except (httpx.RequestError, httpx.TimeoutException) as e:
+            except httpx.RequestError as e:
                 logger.debug(f"[{self.name}] Network error on {url} (attempt {attempt}/{self.max_retries}): {e}")
-                if attempt == self.max_retries:
+                if is_last:
                     return None
-                await asyncio.sleep(1.0 * attempt)
+                await asyncio.sleep(_backoff_seconds(attempt))
+                continue
             except Exception as e:
                 logger.warning(f"[{self.name}] Unexpected error on {url}: {e}")
                 return None
+
+            status = response.status_code
+            if 200 <= status < 300:
+                return response
+            if status == 404:
+                return None
+
+            if status == 429:
+                wait = _parse_retry_after(response.headers.get("Retry-After"), default=2.0 * attempt)
+                if wait > MAX_RETRY_AFTER_SECONDS:
+                    logger.warning(
+                        f"[{self.name}] Rate limited (429) with Retry-After {wait:.0f}s, skipping this request"
+                    )
+                    return None
+                logger.warning(f"[{self.name}] Rate limited (429), waiting {wait:.1f}s...")
+            elif status in RETRYABLE_STATUS_CODES:
+                wait = _backoff_seconds(attempt)
+                logger.debug(f"[{self.name}] HTTP {status} on {url} (attempt {attempt}/{self.max_retries})")
+            else:
+                logger.debug(f"[{self.name}] HTTP {status} on {url}, not retrying")
+                return None
+
+            if is_last:
+                return None
+            await asyncio.sleep(wait)
 
         return None
 

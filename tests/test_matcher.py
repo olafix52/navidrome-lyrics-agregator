@@ -597,3 +597,68 @@ async def test_overwrite_still_rewrites_equal_quality(tmp_path: Path):
     res = await matcher.process_track(track)
     assert res.status == MatchStatus.SUCCESS
     assert "Hello world" in (tmp_path / "song.lrc").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_dry_run_leaves_no_negative_cache_entries(tmp_path: Path):
+    from src.cache import LyricsCache
+
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+    cache = LyricsCache(db_path=tmp_path / "cache.db", ttl_days=7.0)
+
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, dry_run=True), [MockProvider("p1", None)], cache=cache)
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.NOT_FOUND
+    assert await cache.is_negative_hit(track) is None
+
+    # A pre-existing entry is not removed by a dry-run success either
+    await cache.record_negative(track)
+    config = AppConfig(music_dir=tmp_path, dry_run=True, ignore_cache=True)
+    matcher = LyricsMatcher(config, [MockProvider("p1", _lrc_result())], cache=cache)
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert not (tmp_path / "song.lrc").exists()
+    assert await cache.is_negative_hit(track) is not None
+
+
+@pytest.mark.asyncio
+async def test_output_dir_mirrors_library_structure(tmp_path: Path):
+    """Same file name in two albums must produce two separate sidecars under output_dir."""
+    music = tmp_path / "music"
+    out = tmp_path / "lyrics"
+    a = music / "Artist A" / "Album 1" / "01 - Intro.flac"
+    b = music / "Artist B" / "Album 2" / "01 - Intro.flac"
+    for p in (a, b):
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"dummy")
+
+    config = AppConfig(music_dir=music, output_dir=out, cache={"enabled": False})
+    for path, artist in ((a, "Artist A"), (b, "Artist B")):
+        provider = MockProvider("p1", _lrc_result(f"[00:10.00]{artist}").model_copy(update={"artist": artist, "title": "Intro"}))
+        matcher = LyricsMatcher(config, [provider])
+        track = TrackMetadata(file_path=path, title="Intro", artist=artist, duration=200.0)
+        assert (await matcher.process_track(track)).status == MatchStatus.SUCCESS
+
+    assert "Artist A" in (out / "Artist A" / "Album 1" / "01 - Intro.lrc").read_text(encoding="utf-8")
+    assert "Artist B" in (out / "Artist B" / "Album 2" / "01 - Intro.lrc").read_text(encoding="utf-8")
+    assert not (out / "01 - Intro.lrc").exists()
+
+    # Existing mirrored sidecars are detected on the next scan
+    from src.storage import get_existing_lyrics_file
+    found = get_existing_lyrics_file(a, output_dir=out, music_dir=music)
+    assert found is not None and found[0] == out / "Artist A" / "Album 1" / "01 - Intro.lrc"
+
+
+@pytest.mark.asyncio
+async def test_manual_search_cache_is_bounded(tmp_path: Path):
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, cache={"enabled": False}), [])
+    matcher._search_cache_max_entries = 5
+    for i in range(20):
+        matcher._store_search_results(f"k{i}", 1000.0, [])
+    assert len(matcher._search_cache) == 5
+    assert "k19" in matcher._search_cache
+
+    matcher._store_search_results("fresh", 1000.0 + matcher._cache_ttl + 1, [])
+    assert list(matcher._search_cache) == ["fresh"]  # expired entries evicted

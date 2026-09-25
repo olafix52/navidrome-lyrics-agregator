@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Tuple, TypeVar
-from src.cache import UPGRADE_SCOPE, LyricsCache, get_cached_spotify_id
+from src.cache import UPGRADE_SCOPE, LyricsCache, aget_cached_spotify_id
 from src.config import AppConfig
 from src.models import (
     LyricsSyncType,
@@ -90,6 +90,7 @@ class LyricsMatcher:
             )
         self._search_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         self._cache_ttl = 600.0  # 10 minutes cache TTL
+        self._search_cache_max_entries = 256
         self._single_flight = SingleFlight()
 
     async def _fetch_best_lyrics(
@@ -106,7 +107,7 @@ class LyricsMatcher:
 
         # Pre-populate Spotify ID from cache if missing
         if not track.spotify_id:
-            cached_sp = get_cached_spotify_id(
+            cached_sp = await aget_cached_spotify_id(
                 artist=track.clean_artist or track.artist,
                 title=track.clean_title or track.title,
                 isrc=track.isrc,
@@ -190,12 +191,15 @@ class LyricsMatcher:
     async def process_track(self, track: TrackMetadata) -> ProcessResult:
         """Process a single audio track: check existing sidecar, query providers, verify, and save."""
         # 1. Check if track should be skipped based on existing files / tags
-        skip, skip_reason = should_skip_track(
+        skip, skip_reason = await asyncio.to_thread(
+            should_skip_track,
             track.file_path,
             overwrite=self.config.overwrite,
             upgrade_quality=self.config.upgrade_quality,
             storage_mode=getattr(self.config, "storage_mode", "sidecar"),
             output_dir=self.config.output_dir,
+            music_dir=self.config.music_dir,
+            embedded_present=track.has_embedded_lyrics,
         )
         if skip:
             logger.debug(f"[SKIPPED] {track.display_name()} - {skip_reason}")
@@ -240,6 +244,9 @@ class LyricsMatcher:
             )
 
         ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
+        # Dry runs must not leave persistent traces: a "not found" recorded during a
+        # simulation would make the next real run skip the track for the whole TTL.
+        write_cache = self.cache is not None and not self.config.dry_run
 
         if best_match:
             lyrics, provider_name, score = best_match
@@ -251,7 +258,7 @@ class LyricsMatcher:
                         f"[NO UPGRADE] {track.display_name()} - best result ({lyrics.format.value.upper()}, "
                         f"{lyrics.sync_type.value} via {provider_name}) is not better than the existing sidecar"
                     )
-                    if self.cache and not ignore_cache and providers_queried:
+                    if write_cache and not ignore_cache and providers_queried:
                         await self.cache.record_negative(
                             track, providers_checked=providers_queried, scope=UPGRADE_SCOPE
                         )
@@ -265,7 +272,7 @@ class LyricsMatcher:
                 save_mode = StorageMode.EMBEDDED.value
 
             # Remove from negative cache if previously cached
-            if self.cache:
+            if write_cache:
                 await self.cache.remove(track)
                 await self.cache.remove(track, scope=UPGRADE_SCOPE)
 
@@ -276,6 +283,7 @@ class LyricsMatcher:
                 lyrics=lyrics,
                 storage_mode=save_mode,
                 output_dir=getattr(self.config, "output_dir", None),
+                music_dir=self.config.music_dir,
                 dry_run=self.config.dry_run,
                 enhanced_lrc=getattr(self.config, "embed_word_sync", True),
             )
@@ -303,7 +311,7 @@ class LyricsMatcher:
             )
 
         # Record in negative cache so subsequent scans skip this track immediately
-        if self.cache and not ignore_cache and providers_queried:
+        if write_cache and not ignore_cache and providers_queried:
             await self.cache.record_negative(track, providers_checked=providers_queried, scope=cache_scope)
 
         logger.info(f"[NOT FOUND] No matching lyrics found for {track.display_name()}")
@@ -322,11 +330,17 @@ class LyricsMatcher:
         """
         if self.config.overwrite or storage_mode not in (StorageMode.SIDECAR.value, StorageMode.BOTH.value):
             return None, False
-        rank = get_existing_lyrics_rank(track.file_path, output_dir=self.config.output_dir)
+        rank = get_existing_lyrics_rank(
+            track.file_path, output_dir=self.config.output_dir, music_dir=self.config.music_dir
+        )
         if rank is None:
             return None, False
-        tags_missing = storage_mode == StorageMode.BOTH.value and not has_embedded_lyrics(track.file_path)
-        return rank, tags_missing
+        if storage_mode != StorageMode.BOTH.value:
+            return rank, False
+        has_tags = track.has_embedded_lyrics
+        if has_tags is None:
+            has_tags = has_embedded_lyrics(track.file_path)
+        return rank, not has_tags
 
     async def stream_provider_search(
         self,
@@ -407,7 +421,18 @@ class LyricsMatcher:
                 key=lambda x: (sync_order.get(x["sync_type"], 0), x["match_score"]),
                 reverse=True,
             )
-            self._search_cache[cache_key] = (now, collected)
+            self._store_search_results(cache_key, now, collected)
+
+    def _store_search_results(self, key: str, ts: float, candidates: List[Dict[str, Any]]) -> None:
+        """Store manual-search results, evicting expired and oldest entries (long-running web server)."""
+        cache = self._search_cache
+        cache.pop(key, None)
+        expired = [k for k, (t, _) in cache.items() if ts - t >= self._cache_ttl]
+        for k in expired:
+            del cache[k]
+        while len(cache) >= self._search_cache_max_entries:
+            del cache[next(iter(cache))]
+        cache[key] = (ts, candidates)
 
     async def search_all_providers(
         self,
@@ -431,7 +456,7 @@ class LyricsMatcher:
             key=lambda x: (sync_order.get(x["sync_type"], 0), x["match_score"]),
             reverse=True,
         )
-        self._search_cache[cache_key] = (now, candidates)
+        self._store_search_results(cache_key, now, candidates)
         return candidates
 
     async def close(self) -> None:

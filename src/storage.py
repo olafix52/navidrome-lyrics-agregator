@@ -2,6 +2,7 @@ import logging
 import os
 from pathlib import Path
 import threading
+import uuid
 from typing import Dict, Optional, Tuple
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, StorageMode, detect_sync_type
 from src.tag_writer import embed_lyrics_in_audio, has_embedded_lyrics
@@ -95,16 +96,46 @@ class FolderLyricsIndex:
 GLOBAL_FOLDER_INDEX = FolderLyricsIndex()
 
 
+def resolve_sidecar_dir(
+    audio_path: Path,
+    output_dir: Optional[Path] = None,
+    music_dir: Optional[Path] = None,
+) -> Path:
+    """Directory holding the sidecar files for ``audio_path``.
+
+    Without ``output_dir`` sidecars live next to the audio file. With ``output_dir`` and
+    ``music_dir`` the library's folder structure is mirrored below ``output_dir``
+    (``<output_dir>/<Artist>/<Album>/``), so identically named tracks from different
+    albums (``01 - Intro``) never collide; audio outside ``music_dir`` is mirrored by its
+    full path. Without ``music_dir`` there is no library root to mirror from and the
+    sidecar goes directly into ``output_dir``.
+    """
+    if not output_dir:
+        return audio_path.parent
+    if not music_dir:
+        return Path(output_dir)
+    parent = audio_path.parent
+    try:
+        return Path(output_dir) / parent.relative_to(music_dir)
+    except ValueError:
+        pass
+    try:
+        return Path(output_dir) / parent.resolve().relative_to(Path(music_dir).resolve())
+    except (ValueError, OSError):
+        return Path(output_dir) / parent.relative_to(parent.anchor)
+
+
 def get_existing_lyrics_file(
     audio_path: Path,
     output_dir: Optional[Path] = None,
     folder_index: Optional[FolderLyricsIndex] = None,
+    music_dir: Optional[Path] = None,
 ) -> Optional[Tuple[Path, LyricsFormat]]:
     """Check if any companion lyrics file exists for the given audio file.
     
     Returns tuple of (file_path, format) of the highest quality existing lyrics, or None.
     """
-    search_dir = output_dir if output_dir else audio_path.parent
+    search_dir = resolve_sidecar_dir(audio_path, output_dir, music_dir)
     idx = folder_index or GLOBAL_FOLDER_INDEX
     entries = idx.get_dir_entries(search_dir)
     stem = audio_path.stem
@@ -133,9 +164,10 @@ def lyrics_quality_rank(sync_type: LyricsSyncType, fmt: LyricsFormat) -> Tuple[i
 def get_existing_lyrics_rank(
     audio_path: Path,
     output_dir: Optional[Path] = None,
+    music_dir: Optional[Path] = None,
 ) -> Optional[Tuple[int, int]]:
     """Quality rank of the best existing sidecar for the track, or None if there is none."""
-    existing = get_existing_lyrics_file(audio_path, output_dir=output_dir)
+    existing = get_existing_lyrics_file(audio_path, output_dir=output_dir, music_dir=music_dir)
     if not existing:
         return None
     lyrics_path, fmt = existing
@@ -152,9 +184,14 @@ def should_skip_track(
     upgrade_quality: bool = True,
     storage_mode: str = "sidecar",
     output_dir: Optional[Path] = None,
+    music_dir: Optional[Path] = None,
+    embedded_present: Optional[bool] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Determine if a track should be skipped based on existing sidecar files or embedded audio tags.
-    
+
+    ``embedded_present`` may carry an already known "file has embedded lyrics" flag
+    (e.g. from ``read_track_metadata``) to avoid parsing the audio file again.
+
     Returns:
         (should_skip, reason)
     """
@@ -163,18 +200,21 @@ def should_skip_track(
 
     mode = str(storage_mode).lower()
 
+    def _has_tags() -> bool:
+        return embedded_present if embedded_present is not None else has_embedded_lyrics(audio_path)
+
     # 1. Embedded-only mode
     if mode == StorageMode.EMBEDDED.value:
-        if has_embedded_lyrics(audio_path):
+        if _has_tags():
             return True, f"Embedded lyrics already exist in tags ({audio_path.name})"
         return False, None
 
     # 2. Sidecar or Both mode: check sidecar files
-    existing = get_existing_lyrics_file(audio_path, output_dir=output_dir)
+    existing = get_existing_lyrics_file(audio_path, output_dir=output_dir, music_dir=music_dir)
 
     # In 'both' mode, also check embedded tags if sidecar already exists
     if mode == StorageMode.BOTH.value:
-        has_tags = has_embedded_lyrics(audio_path)
+        has_tags = _has_tags()
         if existing and has_tags:
             existing_path, existing_format = existing
             if existing_format == LyricsFormat.TTML:
@@ -214,6 +254,7 @@ def save_lyrics_sidecar(
     dry_run: bool = False,
     remove_lower_quality: bool = True,
     output_dir: Optional[Path] = None,
+    music_dir: Optional[Path] = None,
 ) -> Path:
     """Atomically save lyrics content as a companion sidecar file.
     
@@ -222,12 +263,13 @@ def save_lyrics_sidecar(
         lyrics: LyricsResult object containing content and format
         dry_run: If True, simulate without writing to disk
         remove_lower_quality: If True and we saved TTML/YAML, remove obsolete .lrc/.txt files
-        output_dir: Optional custom destination folder instead of audio file directory
+        output_dir: Optional custom destination root (library structure is mirrored below it)
+        music_dir: Library root used to mirror the folder structure below ``output_dir``
         
     Returns:
         Target file path
     """
-    dest_dir = output_dir if output_dir else audio_path.parent
+    dest_dir = resolve_sidecar_dir(audio_path, output_dir, music_dir)
     target_path = dest_dir / f"{audio_path.stem}{lyrics.format.extension}"
 
     if dry_run:
@@ -237,8 +279,8 @@ def save_lyrics_sidecar(
     # Ensure parent directory exists
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Atomic write via temporary file
-    temp_path = target_path.parent / f"{target_path.name}.tmp_{os.getpid()}"
+    # Atomic write via temporary file (unique per writer: watcher and scanner can run concurrently)
+    temp_path = target_path.parent / f".{target_path.name}.tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
         with open(temp_path, "w", encoding="utf-8") as f:
             f.write(lyrics.content.strip() + "\n")
@@ -275,6 +317,7 @@ def save_lyrics_for_track(
     dry_run: bool = False,
     remove_lower_quality: bool = True,
     enhanced_lrc: bool = True,
+    music_dir: Optional[Path] = None,
 ) -> Tuple[Optional[Path], bool]:
     """Save lyrics according to the configured storage mode: sidecar, embedded, or both.
     
@@ -293,6 +336,7 @@ def save_lyrics_for_track(
             dry_run=dry_run,
             remove_lower_quality=remove_lower_quality,
             output_dir=output_dir,
+            music_dir=music_dir,
         )
 
     # 2. Embed lyrics in audio file tags if mode is 'embedded' or 'both'

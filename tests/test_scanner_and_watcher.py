@@ -249,3 +249,63 @@ async def test_scanner_streaming_scan_and_process(tmp_path: Path):
         assert paths == {t1, t2}
 
 
+
+
+@pytest.mark.asyncio
+async def test_scanner_skips_before_reading_tags(tmp_path, monkeypatch):
+    """Tracks that already have TTML must be skipped without parsing the audio file."""
+    from unittest.mock import AsyncMock
+    import src.scanner as scanner_mod
+    from src.config import AppConfig
+    from src.models import MatchStatus
+    from src.scanner import LibraryScanner
+
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(b"dummy")
+    (tmp_path / "song.ttml").write_text("<tt/>", encoding="utf-8")
+
+    def _boom(_):
+        raise AssertionError("metadata must not be read for skipped tracks")
+
+    monkeypatch.setattr(scanner_mod, "read_track_metadata", _boom)
+    matcher = AsyncMock()
+    scanner = LibraryScanner(AppConfig(music_dir=tmp_path), matcher)
+    res = await scanner._process_single_file(audio)
+    assert res.status == MatchStatus.SKIPPED
+    matcher.process_track.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_watcher_keeps_references_to_its_tasks(tmp_path):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from src.watcher import AudioFileEventHandler
+
+    loop = asyncio.get_running_loop()
+    handler = AudioFileEventHandler(loop=loop, matcher=AsyncMock(), debounce_seconds=0.05)
+    handler._schedule_event(str(tmp_path / "missing.flac"))
+    await asyncio.sleep(0.01)
+    assert len(handler._tasks) == 1  # strongly referenced while running
+    await asyncio.sleep(0.1)
+    assert len(handler._tasks) == 0  # released when done
+
+    handler._schedule_event(str(tmp_path / "missing.flac"))
+    await asyncio.sleep(0.01)
+    handler.cancel_pending()
+    await asyncio.sleep(0)
+    assert all(t.cancelled() or t.done() for t in handler._tasks)
+
+
+def test_watch_command_applies_processing_flags():
+    from src.config import AppConfig
+    from src.main import apply_processing_overrides, build_parser
+
+    args = build_parser().parse_args(
+        ["watch", "--storage-mode", "both", "--fast-line-sync", "--word-sync-budget", "2", "--allow-plain"]
+    )
+    config = AppConfig()
+    apply_processing_overrides(args, config)
+    assert config.storage_mode == "both"
+    assert config.early_exit_on_line_sync is True
+    assert config.word_sync_search_budget == 2
+    assert config.allow_plain_lyrics is True

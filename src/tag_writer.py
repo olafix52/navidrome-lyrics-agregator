@@ -4,7 +4,7 @@ import html
 import logging
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import mutagen
 from mutagen.flac import FLAC
@@ -99,6 +99,11 @@ def has_embedded_lyrics(audio_path: Path) -> bool:
         except Exception:
             tags = None
 
+    return tags_have_embedded_lyrics(tags, suffix, audio_path)
+
+
+def tags_have_embedded_lyrics(tags: Any, suffix: str = "", audio_path: Optional[Path] = None) -> bool:
+    """Check already-loaded mutagen tags for embedded lyrics (no file I/O)."""
     if tags is None:
         return False
 

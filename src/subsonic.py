@@ -149,7 +149,10 @@ class SubsonicClient:
         except Exception as e:
             logger.debug(f"Subsonic search3 query='' returned exception, falling back to album listing: {e}")
 
-        # Method 2: Album listing fallback (getAlbumList2.view -> getAlbum.view)
+        # Method 2: Album listing fallback (getAlbumList2.view -> getAlbum.view).
+        # search3 may have failed half-way through pagination: start from scratch so
+        # the partial results are not duplicated by the full album listing.
+        tracks = []
         try:
             album_offset = 0
             album_batch = 200

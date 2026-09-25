@@ -52,7 +52,7 @@
     - **FLAC, OGG, Opus:** Vorbis comments `LYRICS` (Enhanced LRC), `UNSYNCEDLYRICS`, and `LYRICS_TTML`.
     - **M4A / MP4 / ALAC:** QuickTime/Apple atom `©lyr` (`\xa9lyr`).
   - **Storage mode selection (`--storage-mode`):** `sidecar` (default), `embedded` (tags only), or `both`.
-  - **Custom destination directory (`--output-dir`):** Store sidecars in a separate, isolated folder outside the music directory.
+  - **Custom destination directory (`--output-dir`):** Store sidecars in a separate, isolated folder outside the music directory (the library's `Artist/Album/` structure is mirrored inside it).
 
 - **Navidrome / Subsonic API Integration:**
   - **Scan Trigger (`--auto-scan`):** Automatically notifies Navidrome via `/rest/startScan.view` as soon as new lyrics are saved, making them available in clients (Feishin, Symfonium) immediately without waiting for scheduled server scans.
@@ -117,8 +117,6 @@ services:
       dockerfile: Dockerfile
     container_name: navidrome-lyrics-aggregator
     restart: unless-stopped
-    ports:
-      - "8080:8080"
     environment:
       - MUSIC_DIR=/music
       - NLA_SCAN_INTERVAL=1h

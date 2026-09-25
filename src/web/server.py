@@ -4,6 +4,9 @@ import base64
 import hmac
 import json
 import logging
+import threading
+import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -20,7 +23,7 @@ from src.matcher import LyricsMatcher
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
-from src.storage import get_existing_lyrics_file, save_lyrics_sidecar
+from src.storage import get_existing_lyrics_file, save_lyrics_for_track
 from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, read_track_metadata
 from src.web.parser import karaoke_to_ttml, parse_lyrics_to_karaoke
 
@@ -64,6 +67,54 @@ def _request_token(request: Request) -> Optional[str]:
 
 def _token_matches(provided: Optional[str], expected: str) -> bool:
     return bool(provided) and hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
+# How long a library walk / audit is reused before the disk is scanned again
+LIBRARY_CACHE_TTL_SECONDS = 15.0
+
+
+class _TTLValue:
+    """Thread-safe single-value cache with expiry (library listing, audit report)."""
+
+    def __init__(self, ttl: float):
+        self.ttl = ttl
+        self._lock = threading.Lock()
+        self._key: Any = None
+        self._value: Any = None
+        self._ts = 0.0
+
+    def get(self, key: Any, compute):
+        with self._lock:
+            if self._key == key and time.monotonic() - self._ts < self.ttl:
+                return self._value
+        value = compute()
+        with self._lock:
+            self._key, self._value, self._ts = key, value, time.monotonic()
+        return value
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._key = None
+
+
+@lru_cache(maxsize=20000)
+def _cached_sync_type(lyrics_path: str, mtime_ns: int, size: int, fmt: LyricsFormat) -> str:
+    """Sync type of a lyrics file, memoized by (path, mtime, size) so unchanged files are read once."""
+    from src.models import detect_sync_type
+
+    try:
+        content = Path(lyrics_path).read_text(encoding="utf-8", errors="replace")[:4096]
+        return detect_sync_type(content, fmt).value
+    except OSError:
+        return "unsynced"
+
+
+def _sync_type_for(lyrics_path: Path, fmt: LyricsFormat) -> str:
+    try:
+        st = lyrics_path.stat()
+    except OSError:
+        return "unsynced"
+    return _cached_sync_type(str(lyrics_path), st.st_mtime_ns, st.st_size, fmt)
 
 
 def encode_track_id(audio_path: Path, music_dir: Path) -> str:
@@ -162,6 +213,8 @@ def create_app(
     app.state.config = config
     app.state.matcher = matcher
     app.state.auditor = LibraryAuditor()
+    library_cache = _TTLValue(LIBRARY_CACHE_TTL_SECONDS)
+    stats_cache = _TTLValue(LIBRARY_CACHE_TTL_SECONDS)
 
     def get_or_create_matcher() -> LyricsMatcher:
         if app.state.matcher is None:
@@ -170,11 +223,16 @@ def create_app(
         return app.state.matcher
 
     # 1. API STATS / AUDIT
+    # Handlers doing filesystem/tag I/O are plain ``def`` so FastAPI runs them in its
+    # threadpool instead of blocking the event loop (and every other request).
     @app.get("/api/stats")
-    async def get_stats():
+    def get_stats():
         """Get library coverage and lyrics distribution statistics."""
         music_dir = Path(app.state.config.music_dir)
-        report = app.state.auditor.audit_library(music_dir, load_metadata_for_missing=False)
+        report = stats_cache.get(
+            str(music_dir),
+            lambda: app.state.auditor.audit_library(music_dir, load_metadata_for_missing=False),
+        )
         return {
             "music_dir": str(music_dir),
             "total_tracks": report.total_tracks,
@@ -193,7 +251,7 @@ def create_app(
 
     # 2. API TRACKS LISTING
     @app.get("/api/tracks")
-    async def get_tracks(
+    def get_tracks(
         q: Optional[str] = None,
         filter: Optional[str] = "all",  # all, missing, has_lyrics, word_sync, line_sync
         page: int = Query(1, ge=1),
@@ -204,27 +262,24 @@ def create_app(
         if not music_dir.exists():
             return {"total": 0, "page": page, "limit": limit, "tracks": []}
 
-        all_audio = fast_discover_audio_files(music_dir)
+        all_audio = library_cache.get(str(music_dir), lambda: fast_discover_audio_files(music_dir))
+        output_dir = app.state.config.output_dir
 
         items: List[Dict[str, Any]] = []
         for p in all_audio:
             rel_path = str(p.relative_to(music_dir))
-            track_id = encode_track_id(p, music_dir)
+            try:
+                track_id = encode_track_id(p, music_dir)
+            except ValueError:
+                # Symlinked file resolving outside the library: cannot be served safely
+                continue
 
-            existing = get_existing_lyrics_file(p, output_dir=config.output_dir)
+            existing = get_existing_lyrics_file(p, output_dir=output_dir, music_dir=music_dir)
             has_lyrics = existing is not None
             fmt_str = existing[1].value if existing else None
 
-            # Detect sync type if lyrics exist
-            sync_type_str = None
-            if existing:
-                lyrics_path, fmt = existing
-                try:
-                    content = lyrics_path.read_text(encoding="utf-8", errors="replace")[:4096]
-                    from src.models import detect_sync_type
-                    sync_type_str = detect_sync_type(content, fmt).value
-                except Exception:
-                    sync_type_str = "unsynced"
+            # Detect sync type if lyrics exist (memoized per file version)
+            sync_type_str = _sync_type_for(existing[0], existing[1]) if existing else None
 
             # Apply filter
             if filter == "missing" and has_lyrics:
@@ -305,7 +360,7 @@ def create_app(
 
     # 4. API LYRICS & KARAOKE PARSING
     @app.get("/api/tracks/{track_id}/lyrics")
-    async def get_track_lyrics(track_id: str):
+    def get_track_lyrics(track_id: str):
         """Retrieve existing lyrics and parsed karaoke timing lines for player visualization."""
         music_dir = Path(app.state.config.music_dir)
         audio_path = decode_track_id(track_id, music_dir)
@@ -313,7 +368,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="Audio file not found")
 
         meta = read_track_metadata(audio_path)
-        existing = get_existing_lyrics_file(audio_path, output_dir=config.output_dir)
+        existing = get_existing_lyrics_file(
+            audio_path, output_dir=app.state.config.output_dir, music_dir=music_dir
+        )
 
         if not existing:
             return {
@@ -481,7 +538,7 @@ def create_app(
 
     # 6. API SAVE SELECTED LYRICS VERSION TO DISK
     @app.post("/api/tracks/{track_id}/save-lyrics")
-    async def save_lyrics(track_id: str, req: SaveLyricsRequest):
+    def save_lyrics(track_id: str, req: SaveLyricsRequest):
         """Save selected lyrics content as the track sidecar file."""
         music_dir = Path(app.state.config.music_dir)
         audio_path = decode_track_id(track_id, music_dir)
@@ -507,16 +564,24 @@ def create_app(
             provider_name=req.provider or "manual",
         )
 
-        saved_path = save_lyrics_sidecar(
+        # Same destination rules as the scanner: storage_mode + mirrored output_dir
+        cfg = app.state.config
+        saved_path, was_embedded = save_lyrics_for_track(
             audio_path=audio_path,
             lyrics=lyrics_result,
+            storage_mode=cfg.storage_mode,
+            output_dir=cfg.output_dir,
+            music_dir=music_dir,
             dry_run=False,
             remove_lower_quality=True,
+            enhanced_lrc=cfg.embed_word_sync,
         )
+        stats_cache.invalidate()
 
         return {
             "success": True,
-            "saved_file": saved_path.name,
+            "saved_file": saved_path.name if saved_path else "audio tags",
+            "embedded": was_embedded,
             "format": fmt.value,
             "sync_type": sync_type.value,
         }
@@ -585,7 +650,11 @@ def create_app(
                 app.state.config.providers[p_id].enabled = (p_id in clean_list)
 
         providers = build_provider_cascade(app.state.config)
+        old_matcher = app.state.matcher
         app.state.matcher = LyricsMatcher(app.state.config, providers)
+        if old_matcher is not None:
+            # Release the HTTP clients of the replaced provider instances
+            await old_matcher.close()
 
         saved_file = None
         if req.persist:

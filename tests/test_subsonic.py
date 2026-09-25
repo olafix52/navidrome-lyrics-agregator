@@ -281,7 +281,9 @@ async def test_subsonic_scan_path_traversal_prevention(tmp_path):
     from pathlib import Path
 
     output_dir = tmp_path / "lyrics_out"
+    music_dir = tmp_path / "music"
     config = AppConfig(
+        music_dir=music_dir,
         output_dir=output_dir,
         navidrome=NavidromeConfig(url="http://mock:4533", user="u", password="p"),
     )
@@ -297,16 +299,49 @@ async def test_subsonic_scan_path_traversal_prevention(tmp_path):
         suffix="flac",
     )
 
+    # Subsonic track trying to escape the library
+    track_escaping = SubsonicTrack(
+        id="2",
+        title="Evil",
+        artist="Artist",
+        path="../../etc/Evil.flac",
+        suffix="flac",
+    )
+
     with patch("src.subsonic.SubsonicClient.ping", new_callable=AsyncMock, return_value=True), \
-         patch("src.subsonic.SubsonicClient.get_all_tracks", new_callable=AsyncMock, return_value=[track_with_slash]), \
+         patch("src.subsonic.SubsonicClient.get_all_tracks", new_callable=AsyncMock, return_value=[track_with_slash, track_escaping]), \
          patch.object(scanner, "process_metadata_batch", new_callable=AsyncMock, return_value=[]) as mock_batch:
         await scanner.scan_subsonic_library()
         mock_batch.assert_called_once()
         metadata_list = mock_batch.call_args[0][0]
         assert len(metadata_list) == 1
-        # The path should be rooted inside output_dir, not /Artist/...
-        assert metadata_list[0].file_path == output_dir / "Artist/Album/Song.flac"
+        # The audio path is rooted inside the library (sidecar placement below output_dir
+        # is the storage layer's job), never at /Artist/..., and ../ paths are dropped
+        assert metadata_list[0].file_path == music_dir / "Artist/Album/Song.flac"
         assert metadata_list[0].file_path != Path("/Artist/Album/Song.flac")
 
     await matcher.close()
 
+
+
+@pytest.mark.asyncio
+async def test_get_all_tracks_fallback_does_not_duplicate_partial_results():
+    """search3 failing mid-pagination must not leave its partial results next to the album listing."""
+    client = SubsonicClient("http://mock:4533", "u", "p")
+    song = lambda i: {"id": str(i), "title": f"T{i}", "artist": "A", "path": f"A/{i}.flac"}
+
+    async def fake_get(endpoint, extra_params=None):
+        if endpoint == "search3.view":
+            if extra_params["songOffset"] == 0:
+                return {"searchResult3": {"song": [song(1), song(2)]}}
+            raise RuntimeError("boom on page 2")
+        if endpoint == "getAlbumList2.view":
+            return {"albumList2": {"album": [{"id": "al1"}]}}
+        if endpoint == "getAlbum.view":
+            return {"album": {"song": [song(1), song(2), song(3)]}}
+        raise AssertionError(endpoint)
+
+    with patch.object(client, "_get", side_effect=fake_get):
+        tracks = await client.get_all_tracks(batch_size=2)
+    assert [t.id for t in tracks] == ["1", "2", "3"]
+    await client.close()

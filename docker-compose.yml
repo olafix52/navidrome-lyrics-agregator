@@ -26,8 +26,11 @@ services:
       dockerfile: Dockerfile
     container_name: navidrome-lyrics-aggregator
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # The default command (daemon) does not serve the Web UI. To run the dashboard instead,
+    # use: command: ["web", "--host", "0.0.0.0", "--token", "<long random secret>"]
+    # and uncomment the port mapping below.
+    # ports:
+    #   - "8080:8080"
     environment:
       - MUSIC_DIR=/music
       - NLA_SCAN_INTERVAL=1h

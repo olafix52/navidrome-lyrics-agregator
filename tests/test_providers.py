@@ -1649,9 +1649,7 @@ def test_providers_module_annotations():
     assert "PROVIDER_METADATA" in hints
 
 
-@pytest.mark.asyncio
-async def test_base_provider_retry_after_http_date():
-    """Verify that BaseLyricsProvider.request_with_retry does not crash on RFC HTTP-date Retry-After."""
+def _dummy_retry_provider(max_retries: int = 2):
     from src.providers.base import BaseLyricsProvider
 
     class DummyProvider(BaseLyricsProvider):
@@ -1659,23 +1657,70 @@ async def test_base_provider_retry_after_http_date():
         async def get_lyrics(self, track):
             return None
 
-    prov = DummyProvider(config=ProviderConfig(timeout_seconds=5.0), max_retries=2)
-    mock_resp_429 = MagicMock()
-    mock_resp_429.status_code = 429
-    mock_resp_429.headers = {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}
+    return DummyProvider(config=ProviderConfig(timeout_seconds=5.0), max_retries=max_retries)
 
-    mock_resp_200 = MagicMock()
-    mock_resp_200.status_code = 200
-    mock_resp_200.raise_for_status.return_value = None
 
+def _mock_response(status: int, headers=None):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.headers = headers or {}
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_base_provider_retry_after_http_date():
+    """An RFC HTTP-date Retry-After is parsed and honoured when it is short."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    prov = _dummy_retry_provider()
+    soon = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=10), usegmt=True)
+    mock_resp_200 = _mock_response(200)
     mock_client = MagicMock()
-    mock_client.request = AsyncMock(side_effect=[mock_resp_429, mock_resp_200])
+    mock_client.request = AsyncMock(side_effect=[_mock_response(429, {"Retry-After": soon}), mock_resp_200])
 
     with patch.object(prov, "get_client", new_callable=AsyncMock, return_value=mock_client), \
          patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         resp = await prov.request_with_retry("GET", "https://example.com/api")
         assert resp == mock_resp_200
-        mock_sleep.assert_called_once_with(2.0)
+        mock_sleep.assert_called_once()
+        assert 0 < mock_sleep.call_args.args[0] <= 11
+
+
+@pytest.mark.asyncio
+async def test_base_provider_gives_up_on_long_retry_after():
+    """A Retry-After far in the future must not block a worker for days."""
+    prov = _dummy_retry_provider()
+    mock_client = MagicMock()
+    mock_client.request = AsyncMock(side_effect=[
+        _mock_response(429, {"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"}),
+        _mock_response(200),
+    ])
+
+    with patch.object(prov, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        assert await prov.request_with_retry("GET", "https://example.com/api") is None
+        mock_sleep.assert_not_called()
+        assert mock_client.request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_base_provider_does_not_retry_client_errors_but_backs_off_on_5xx():
+    prov = _dummy_retry_provider(max_retries=3)
+    mock_client = MagicMock()
+    mock_client.request = AsyncMock(side_effect=[_mock_response(403)])
+    with patch.object(prov, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        assert await prov.request_with_retry("GET", "https://example.com/api") is None
+        assert mock_client.request.await_count == 1
+        mock_sleep.assert_not_called()
+
+    ok = _mock_response(200)
+    mock_client.request = AsyncMock(side_effect=[_mock_response(503), _mock_response(502), ok])
+    with patch.object(prov, "get_client", new_callable=AsyncMock, return_value=mock_client), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        assert await prov.request_with_retry("GET", "https://example.com/api") is ok
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [1.0, 2.0]
 
 
 @pytest.mark.asyncio

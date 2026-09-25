@@ -5,11 +5,25 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+
+MIN_SCAN_INTERVAL_SECONDS = 60
+VALID_STORAGE_MODES = ("sidecar", "embedded", "both")
+
+
+class ConfigFileError(Exception):
+    """Raised when an explicitly requested configuration file cannot be used."""
 
 
 def parse_time_string_to_seconds(time_str: str | int | float) -> int:
-    """Convert human readable time string (e.g. '1h', '30m', '3600s', '1d') to seconds."""
+    """Convert human readable time string (e.g. '1h', '30m', '3600s', '1d') to seconds.
+
+    Raises ValueError for strings that are not a valid duration (instead of silently
+    falling back to a default).
+    """
+    if isinstance(time_str, bool):
+        raise ValueError(f"Invalid time interval: {time_str!r}")
     if isinstance(time_str, (int, float)):
         return int(time_str)
 
@@ -29,10 +43,17 @@ def parse_time_string_to_seconds(time_str: str | int | float) -> int:
         multiplier = units.get(unit or "s", 1)
         return int(float(val) * multiplier)
 
-    try:
-        return int(s)
-    except ValueError:
-        return 3600
+    raise ValueError(f"Invalid time interval {time_str!r} (expected e.g. '3600', '30m', '1h', '1d')")
+
+
+def validate_scan_interval(value: str | int | float) -> int:
+    """Parse a scan interval and enforce the minimum (0 would make the daemon rescan in a busy loop)."""
+    seconds = parse_time_string_to_seconds(value)
+    if seconds < MIN_SCAN_INTERVAL_SECONDS:
+        raise ValueError(
+            f"Scan interval {value!r} is too short (minimum {MIN_SCAN_INTERVAL_SECONDS} seconds)"
+        )
+    return seconds
 
 
 class ProviderConfig(BaseModel):
@@ -213,9 +234,25 @@ class AppConfig(BaseModel):
                 merged[key] = override
         return merged
 
+    @field_validator("scan_interval", mode="before")
+    @classmethod
+    def _validate_scan_interval(cls, value: Any) -> Any:
+        validate_scan_interval(value)
+        return str(value) if isinstance(value, (int, float)) else value
+
+    @field_validator("storage_mode", mode="before")
+    @classmethod
+    def _validate_storage_mode(cls, value: Any) -> Any:
+        mode = str(getattr(value, "value", value)).strip().lower()
+        if mode not in VALID_STORAGE_MODES:
+            raise ValueError(
+                f"Invalid storage_mode {value!r} (expected one of: {', '.join(VALID_STORAGE_MODES)})"
+            )
+        return mode
+
     @property
     def scan_interval_seconds(self) -> int:
-        return parse_time_string_to_seconds(self.scan_interval)
+        return validate_scan_interval(self.scan_interval)
 
 
 def _apply_env_overrides(data: Dict[str, Any]) -> None:
@@ -351,8 +388,18 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
 
     data: Dict[str, Any] = {}
 
-    # If explicit path provided or via env var, use it directly
-    explicit = config_path or (Path(os.environ["NLA_CONFIG"]) if os.environ.get("NLA_CONFIG") else None)
+    # An explicit --config path must exist: silently falling back to ./config.yaml would
+    # run with a different configuration than the user asked for.
+    if config_path is not None and not Path(config_path).is_file():
+        raise ConfigFileError(f"Config file not found: {config_path}")
+
+    # NLA_CONFIG (set by the Docker image) may legitimately point to an unmounted file;
+    # in that case defaults + environment variables are used.
+    env_config = Path(os.environ["NLA_CONFIG"]) if os.environ.get("NLA_CONFIG") else None
+    if config_path is None and env_config is not None and not env_config.is_file():
+        print(f"Warning: NLA_CONFIG={env_config} does not exist, using defaults and environment variables")
+
+    explicit = config_path or env_config
     if explicit and explicit.is_file():
         try:
             with open(explicit, "r", encoding="utf-8") as f:
@@ -391,7 +438,10 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
                 print(f"Warning: Failed to load local config from {local_path}: {e}")
 
     _apply_env_overrides(data)
-    return AppConfig(**data)
+    try:
+        return AppConfig(**data)
+    except ValidationError as e:
+        raise ConfigFileError(str(e)) from e
 
 
 def save_enabled_providers(

@@ -1,6 +1,7 @@
 """SQLite-backed persistent cache for negative lyrics lookups and lookup metadata."""
 
 import asyncio
+from contextlib import closing
 from dataclasses import dataclass, field
 import hashlib
 import logging
@@ -82,18 +83,7 @@ def get_cached_spotify_id(
         return None
 
     try:
-        conn = sqlite3.connect(str(target_db), timeout=5.0)
-        try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS spotify_id_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    artist TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    isrc TEXT,
-                    spotify_id TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                );
-            """)
+        with closing(sqlite3.connect(str(target_db), timeout=5.0)) as conn:
             cursor = conn.cursor()
             found_id: Optional[str] = None
 
@@ -122,9 +112,9 @@ def get_cached_spotify_id(
                 if meta_key != ":::":
                     _SPOTIFY_ID_MEM_CACHE[meta_key] = found_id
                 return found_id
-
-        finally:
-            conn.close()
+    except sqlite3.OperationalError as e:
+        # Table not created yet (no Spotify ID stored so far) or database busy
+        logger.debug(f"[cache] Spotify ID lookup unavailable in {target_db}: {e}")
     except Exception as e:
         logger.debug(f"[cache] Failed reading Spotify ID from database {target_db}: {e}")
 
@@ -148,6 +138,12 @@ def set_cached_spotify_id(
     meta_key = _spotify_cache_key(artist, title)
     norm_isrc = isrc.strip().upper() if isrc and isrc.strip() else None
 
+    # Already known with the same value -> nothing to persist (avoids a DB write per track)
+    isrc_known = not norm_isrc or _SPOTIFY_ID_MEM_CACHE.get(f"isrc:{norm_isrc}") == sp_id
+    meta_known = meta_key == ":::" or _SPOTIFY_ID_MEM_CACHE.get(meta_key) == sp_id
+    if isrc_known and meta_known:
+        return
+
     # 1. Update in-memory cache
     if norm_isrc:
         _SPOTIFY_ID_MEM_CACHE[f"isrc:{norm_isrc}"] = sp_id
@@ -158,8 +154,7 @@ def set_cached_spotify_id(
     target_db = Path(db_path) if db_path else get_active_cache_db_path()
     try:
         target_db.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(target_db), timeout=5.0)
-        try:
+        with closing(sqlite3.connect(str(target_db), timeout=5.0)) as conn:
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
             conn.execute("PRAGMA busy_timeout = 5000;")
@@ -189,10 +184,40 @@ def set_cached_spotify_id(
                     created_at = excluded.created_at;
             """, (meta_key, clean_a, clean_t, norm_isrc, sp_id, now))
             conn.commit()
-        finally:
-            conn.close()
     except Exception as e:
         logger.debug(f"[cache] Failed saving Spotify ID to database {target_db}: {e}")
+
+
+async def aget_cached_spotify_id(
+    artist: Optional[str] = None,
+    title: Optional[str] = None,
+    isrc: Optional[str] = None,
+    db_path: Optional[Path | str] = None,
+) -> Optional[str]:
+    """Async variant of :func:`get_cached_spotify_id` for use inside the event loop.
+
+    Memory hits return immediately; SQLite lookups run in a worker thread so a busy
+    database never stalls other tasks.
+    """
+    if isrc and isrc.strip():
+        hit = _SPOTIFY_ID_MEM_CACHE.get(f"isrc:{isrc.strip().upper()}")
+        if hit:
+            return hit
+    meta_key = _spotify_cache_key(artist, title)
+    if meta_key != ":::" and meta_key in _SPOTIFY_ID_MEM_CACHE:
+        return _SPOTIFY_ID_MEM_CACHE[meta_key]
+    return await asyncio.to_thread(get_cached_spotify_id, artist, title, isrc, db_path)
+
+
+async def aset_cached_spotify_id(
+    artist: Optional[str],
+    title: Optional[str],
+    spotify_id: str,
+    isrc: Optional[str] = None,
+    db_path: Optional[Path | str] = None,
+) -> None:
+    """Async variant of :func:`set_cached_spotify_id` (SQLite write runs in a worker thread)."""
+    await asyncio.to_thread(set_cached_spotify_id, artist, title, spotify_id, isrc, db_path)
 
 
 class LyricsCache:
@@ -210,10 +235,14 @@ class LyricsCache:
         set_active_cache_db_path(self.db_path)
 
     def _get_raw_connection(self) -> sqlite3.Connection:
-        """Create a configured SQLite connection with WAL journal mode and busy timeout."""
+        """Create a configured SQLite connection with busy timeout.
+
+        WAL journal mode is persistent in the database file and is set once in ``_init_db_sync``.
+        Callers must close the connection (use ``closing(...)``); ``with conn:`` alone only
+        commits/rolls back and leaves the connection open.
+        """
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
         conn.execute("PRAGMA mmap_size = 268435456;")
@@ -226,7 +255,8 @@ class LyricsCache:
         if self._initialized:
             return
 
-        with self._get_raw_connection() as conn:
+        with closing(self._get_raw_connection()) as conn:
+            conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS negative_cache (
                     cache_key TEXT PRIMARY KEY,
@@ -283,7 +313,7 @@ class LyricsCache:
     def _is_negative_hit_sync(self, cache_key: str) -> Optional[NegativeCacheHit]:
         self._init_db_sync()
         now = time.time()
-        with self._get_raw_connection() as conn:
+        with closing(self._get_raw_connection()) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -338,7 +368,7 @@ class LyricsCache:
         expires_at = now + (self.ttl_days * 86400.0)
         providers_str = ",".join(providers_checked)
 
-        with self._get_raw_connection() as conn:
+        with closing(self._get_raw_connection()) as conn:
             conn.execute(
                 """
                 INSERT INTO negative_cache (
@@ -382,7 +412,7 @@ class LyricsCache:
 
     def _remove_sync(self, cache_key: str) -> bool:
         self._init_db_sync()
-        with self._get_raw_connection() as conn:
+        with closing(self._get_raw_connection()) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM negative_cache WHERE cache_key = ?", (cache_key,))
             conn.commit()
@@ -397,7 +427,7 @@ class LyricsCache:
     def _clear_sync(self, expired_only: bool = False) -> int:
         self._init_db_sync()
         now = time.time()
-        with self._get_raw_connection() as conn:
+        with closing(self._get_raw_connection()) as conn:
             cursor = conn.cursor()
             if expired_only:
                 cursor.execute("DELETE FROM negative_cache WHERE expires_at <= ?", (now,))
@@ -452,7 +482,7 @@ class LyricsCache:
     def _get_stats_sync(self) -> Dict[str, Any]:
         self._init_db_sync()
         now = time.time()
-        with self._get_raw_connection() as conn:
+        with closing(self._get_raw_connection()) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM negative_cache")
             total = cursor.fetchone()[0]

@@ -29,8 +29,10 @@ COPY src/ ./src/
 COPY config.example.yaml ./config.example.yaml
 COPY config.example.yaml ./config.yaml
 
-# Create default directories and declare volumes
-RUN mkdir -p /music /config /data
+# Create default directories and declare volumes.
+# /app/data -> /data: relative "data/..." paths (e.g. the Musixmatch token_path default)
+# land on the persistent volume instead of the container's writable layer.
+RUN mkdir -p /music /config /data && ln -s /data /app/data
 VOLUME ["/music", "/config", "/data"]
 
 # Expose Web UI port

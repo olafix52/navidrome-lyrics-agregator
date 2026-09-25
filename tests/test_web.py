@@ -632,3 +632,42 @@ def test_frontend_escapes_untrusted_values():
         assert raw not in renderer_js, f"unescaped interpolation {raw} in ttml-renderer.js"
     assert 'escapeHtml(provider || "Spicy Lyrics")' in renderer_js
     assert "safeUrl(person.url)" in renderer_js
+
+
+@pytest.mark.asyncio
+async def test_save_lyrics_honours_output_dir(tmp_path: Path):
+    """Lyrics saved from the UI must land where the reader (and the scanner) look for them."""
+    music_dir = tmp_path / "music"
+    out = tmp_path / "lyrics"
+    audio = music_dir / "Artist" / "Album" / "Song.mp3"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00dummy")
+
+    app = create_app(AppConfig(music_dir=music_dir, output_dir=out))
+    track_id = encode_track_id(audio, music_dir)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.post(
+            f"/api/tracks/{track_id}/save-lyrics",
+            json={"content": "[00:01.00]Hello", "format": "lrc"},
+        )
+        assert res.status_code == 200
+        assert (out / "Artist" / "Album" / "Song.lrc").is_file()
+        assert not (audio.parent / "Song.lrc").exists()
+
+        lyr = (await client.get(f"/api/tracks/{track_id}/lyrics")).json()
+        assert lyr["has_lyrics"] is True
+        assert "Hello" in lyr["content"]
+
+
+@pytest.mark.asyncio
+async def test_update_providers_closes_replaced_matcher(tmp_path: Path):
+    from unittest.mock import AsyncMock
+
+    old = AsyncMock()
+    app = create_app(AppConfig(music_dir=tmp_path), matcher=old)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        res = await client.post("/api/providers", json={"enabled_providers": ["lrclib"], "persist": False})
+        assert res.status_code == 200
+    old.close.assert_awaited_once()

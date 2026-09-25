@@ -95,6 +95,16 @@ def test_run_providers_command_enable_and_disable(tmp_path: Path):
     assert '- "lrclib"' in content2
 
 
+def _isolate_from_dotenv(monkeypatch) -> None:
+    """load_config() calls load_dotenv(), which would import the developer's real .env
+    (API keys) into os.environ for the rest of the test session."""
+    import dotenv
+
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+    for var in ("SPICY_LYRICS_SECRET_KEY", "NLA_SPICY_LYRICS_API_KEY", "NLA_CONFIG", "NLA_ENABLED_PROVIDERS"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_global_options_before_subcommand_are_kept():
     """Options given before the subcommand must not be reset by the subcommand's defaults."""
     parser = build_parser()
@@ -121,6 +131,7 @@ def test_provider_config_overrides_merge_with_defaults(monkeypatch, tmp_path: Pa
     from src.config import ProviderConfig, load_config
 
     monkeypatch.chdir(tmp_path)  # no config.yaml / config.local.yaml
+    _isolate_from_dotenv(monkeypatch)
     monkeypatch.setenv("SPICY_LYRICS_SECRET_KEY", "sl_sk_test")
     config = load_config()
     assert config.providers["spicylyrics"].api_key == "sl_sk_test"
@@ -141,3 +152,35 @@ def test_provider_config_overrides_merge_with_defaults(monkeypatch, tmp_path: Pa
     assert partial.providers["amll"].enabled is False
     assert partial.providers["amll"].rate_limit_per_second == 5.0
     assert "kugou" in partial.providers
+
+
+def test_missing_explicit_config_file_is_an_error(tmp_path: Path, monkeypatch):
+    import pytest
+    from src.config import ConfigFileError, load_config
+
+    monkeypatch.chdir(tmp_path)
+    _isolate_from_dotenv(monkeypatch)
+    with pytest.raises(ConfigFileError):
+        load_config(tmp_path / "typo.yaml")
+
+    # NLA_CONFIG (Docker default) pointing to an unmounted file falls back to defaults
+    monkeypatch.setenv("NLA_CONFIG", str(tmp_path / "not-mounted.yaml"))
+    assert load_config().storage_mode == "sidecar"
+
+
+def test_invalid_storage_mode_and_scan_interval_rejected(tmp_path: Path, monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+    from src.config import ConfigFileError, load_config
+
+    for bad in ({"storage_mode": "embed"}, {"scan_interval": "0"}, {"scan_interval": "soon"}, {"scan_interval": "30s"}):
+        with pytest.raises(ValidationError):
+            AppConfig(**bad)
+    assert AppConfig(storage_mode="Both").storage_mode == "both"
+    assert AppConfig(scan_interval="2h").scan_interval_seconds == 7200
+
+    monkeypatch.chdir(tmp_path)
+    _isolate_from_dotenv(monkeypatch)
+    (tmp_path / "cfg.yaml").write_text("storage_mode: embed\n", encoding="utf-8")
+    with pytest.raises(ConfigFileError):
+        load_config(tmp_path / "cfg.yaml")

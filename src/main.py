@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Main CLI entry point for Navidrome Lyrics Aggregator."""
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.audit import LibraryAuditor, LibraryPruner
-from src.config import AppConfig, load_config
+from src.config import AppConfig, ConfigFileError, load_config, validate_scan_interval
 from src.logger import console, setup_logger
 from src.matcher import LyricsMatcher
 from src.models import LyricsFormat, TrackMetadata
@@ -24,8 +24,12 @@ from src.watcher import DirectoryWatcher
 logger = logging.getLogger("nla.main")
 
 
-async def run_scan_command(args: argparse.Namespace, config) -> None:
-    """Execute one-time library scan."""
+def apply_processing_overrides(args: argparse.Namespace, config: AppConfig) -> None:
+    """Apply CLI flags shared by the lyrics-fetching commands (scan/daemon/watch/upgrade).
+
+    Every flag is read with ``getattr`` so a command only needs to define the options it
+    supports; all of them are honoured wherever they are defined.
+    """
     if getattr(args, "force", False):
         config.overwrite = True
         config.ignore_cache = True
@@ -57,6 +61,11 @@ async def run_scan_command(args: argparse.Namespace, config) -> None:
         config.early_exit_on_line_sync = True
     if getattr(args, "word_sync_budget", None) is not None:
         config.word_sync_search_budget = args.word_sync_budget
+
+
+async def run_scan_command(args: argparse.Namespace, config) -> None:
+    """Execute one-time library scan."""
+    apply_processing_overrides(args, config)
 
     target_str = getattr(args, "path", None) or getattr(args, "target", None) or getattr(args, "music_dir", None)
     target_path = Path(target_str) if target_str else config.music_dir
@@ -120,32 +129,14 @@ async def run_ping_navidrome_command(args: argparse.Namespace, config) -> None:
 
 async def run_daemon_command(args: argparse.Namespace, config) -> None:
     """Execute continuous daemon mode with scheduled scans and optional watcher."""
-    if getattr(args, "music_dir", None):
-        config.music_dir = Path(args.music_dir)
+    apply_processing_overrides(args, config)
     if getattr(args, "interval", None):
+        try:
+            validate_scan_interval(args.interval)
+        except ValueError as e:
+            console.print(f"[bold red]Invalid --interval:[/bold red] {e}")
+            return
         config.scan_interval = args.interval
-    if getattr(args, "allow_plain", False):
-        config.allow_plain_lyrics = True
-    if getattr(args, "no_cache", False):
-        config.ignore_cache = True
-    if getattr(args, "cache_db", None):
-        config.cache.db_path = Path(args.cache_db)
-    if getattr(args, "storage_mode", None):
-        config.storage_mode = args.storage_mode
-    if getattr(args, "output_dir", None):
-        config.output_dir = Path(args.output_dir)
-    if getattr(args, "navidrome_url", None):
-        config.navidrome.url = args.navidrome_url
-    if getattr(args, "navidrome_user", None):
-        config.navidrome.user = args.navidrome_user
-    if getattr(args, "navidrome_password", None):
-        config.navidrome.password = args.navidrome_password
-    if getattr(args, "auto_scan", False):
-        config.navidrome.auto_scan = True
-    if getattr(args, "fast_line_sync", False):
-        config.early_exit_on_line_sync = True
-    if getattr(args, "word_sync_budget", None) is not None:
-        config.word_sync_search_budget = args.word_sync_budget
 
     providers = build_provider_cascade(config)
     matcher = LyricsMatcher(config, providers)
@@ -185,14 +176,7 @@ async def run_daemon_command(args: argparse.Namespace, config) -> None:
 
 async def run_watch_command(args: argparse.Namespace, config) -> None:
     """Execute real-time filesystem watcher mode."""
-    if args.music_dir:
-        config.music_dir = Path(args.music_dir)
-    if getattr(args, "allow_plain", False):
-        config.allow_plain_lyrics = True
-    if getattr(args, "no_cache", False):
-        config.ignore_cache = True
-    if getattr(args, "cache_db", None):
-        config.cache.db_path = Path(args.cache_db)
+    apply_processing_overrides(args, config)
 
     providers = build_provider_cascade(config)
     matcher = LyricsMatcher(config, providers)
@@ -242,6 +226,14 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
             metadata.spotify_id = cached_sp
             console.print(f"[dim cyan]Reusing cached Spotify ID: {cached_sp}[/dim cyan]")
 
+    try:
+        await _query_each_provider(providers, metadata)
+    finally:
+        await matcher.close()
+
+
+async def _query_each_provider(providers, metadata: TrackMetadata) -> None:
+    """Query every provider for ``metadata`` and print a preview of each hit (test-track)."""
     for provider in providers:
         console.print(f"[bold yellow]Querying provider '{provider.name}'...[/bold yellow]")
         try:
@@ -262,8 +254,6 @@ async def run_test_track_command(args: argparse.Namespace, config) -> None:
                 console.print("  [dim]No lyrics found on this provider[/dim]\n")
         except Exception as e:
             console.print(f"  [bold red]Error querying {provider.name}:[/bold red] {e}\n")
-
-    await matcher.close()
 
 
 async def run_cache_command(args: argparse.Namespace, config) -> None:
@@ -324,29 +314,7 @@ async def run_audit_command(args: argparse.Namespace, config) -> None:
 
 async def run_upgrade_command(args: argparse.Namespace, config) -> None:
     """Scan and upgrade tracks with missing or lower-quality lyrics (to TTML word-sync)."""
-    if getattr(args, "force", False):
-        config.overwrite = True
-        config.ignore_cache = True
-    if getattr(args, "dry_run", False):
-        config.dry_run = True
-    if getattr(args, "allow_plain", False):
-        config.allow_plain_lyrics = True
-    if getattr(args, "no_cache", False):
-        config.ignore_cache = True
-    if getattr(args, "cache_db", None):
-        config.cache.db_path = Path(args.cache_db)
-    if getattr(args, "concurrency", None):
-        config.concurrency = args.concurrency
-    if getattr(args, "music_dir", None):
-        config.music_dir = Path(args.music_dir)
-    if getattr(args, "storage_mode", None):
-        config.storage_mode = args.storage_mode
-    if getattr(args, "output_dir", None):
-        config.output_dir = Path(args.output_dir)
-    if getattr(args, "auto_scan", False):
-        config.navidrome.auto_scan = True
-    if getattr(args, "word_sync_budget", None) is not None:
-        config.word_sync_search_budget = args.word_sync_budget
+    apply_processing_overrides(args, config)
 
     target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
     target_path = Path(target_str) if target_str else config.music_dir
@@ -361,7 +329,9 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
 
         candidates = []
         for audio_path in all_audio:
-            existing = get_existing_lyrics_file(audio_path, output_dir=config.output_dir)
+            existing = get_existing_lyrics_file(
+                audio_path, output_dir=config.output_dir, music_dir=config.music_dir
+            )
             if existing:
                 _, fmt = existing
                 if not args.force and fmt in (LyricsFormat.TTML, LyricsFormat.YAML):
@@ -793,7 +763,11 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = Path(args.config) if args.config else None
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except ConfigFileError as e:
+        console.print(f"[bold red]Configuration error:[/bold red] {e}")
+        sys.exit(2)
 
     # Apply CLI provider overrides to config
     if getattr(args, "providers", None):

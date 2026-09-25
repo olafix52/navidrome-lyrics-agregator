@@ -30,16 +30,26 @@ class AudioFileEventHandler(FileSystemEventHandler):
         self.matcher = matcher
         self.debounce_seconds = debounce_seconds
         self._pending_files: Dict[Path, float] = {}
-        self._lock = asyncio.Lock()
         self._processing: Set[Path] = set()
+        # Strong references to running tasks: the event loop only keeps weak references,
+        # so an unreferenced task can be garbage-collected before it finishes.
+        self._tasks: Set[asyncio.Task] = set()
 
     def _schedule_event(self, path_str: str) -> None:
         file_path = Path(path_str)
         if is_supported_audio_file(file_path):
-            self.loop.call_soon_threadsafe(
-                asyncio.create_task,
-                self._debounce_and_process(file_path),
-            )
+            self.loop.call_soon_threadsafe(self._start_task, file_path)
+
+    def _start_task(self, file_path: Path) -> None:
+        """Create the debounce task on the event loop thread and keep a reference to it."""
+        task = self.loop.create_task(self._debounce_and_process(file_path))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def cancel_pending(self) -> None:
+        """Cancel all in-flight debounce/processing tasks (used on shutdown)."""
+        for task in list(self._tasks):
+            task.cancel()
 
     def on_created(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
@@ -76,7 +86,7 @@ class AudioFileEventHandler(FileSystemEventHandler):
                 return
 
             logger.info(f"[WATCHER EVENT] Detected audio file: {file_path.name}")
-            metadata = read_track_metadata(file_path)
+            metadata = await asyncio.to_thread(read_track_metadata, file_path)
             if metadata:
                 result = await self.matcher.process_track(metadata)
                 if result.status == MatchStatus.SUCCESS:
@@ -94,6 +104,7 @@ class DirectoryWatcher:
         self.config = config
         self.matcher = matcher
         self.observer: Optional[Observer] = None
+        self.handler: Optional[AudioFileEventHandler] = None
 
     async def start(self) -> None:
         """Start the watchdog observer."""
@@ -103,14 +114,14 @@ class DirectoryWatcher:
             return
 
         loop = asyncio.get_running_loop()
-        handler = AudioFileEventHandler(
+        self.handler = AudioFileEventHandler(
             loop=loop,
             matcher=self.matcher,
             debounce_seconds=self.config.watch_debounce_seconds,
         )
 
         self.observer = Observer()
-        self.observer.schedule(handler, str(root_dir), recursive=True)
+        self.observer.schedule(self.handler, str(root_dir), recursive=True)
         self.observer.start()
 
         logger.info(f"Started real-time file watcher on: {root_dir}")
@@ -124,7 +135,9 @@ class DirectoryWatcher:
             self.stop()
 
     def stop(self) -> None:
-        """Stop the watchdog observer."""
+        """Stop the watchdog observer and cancel pending event tasks."""
+        if self.handler:
+            self.handler.cancel_pending()
         if self.observer and self.observer.is_alive():
             logger.info("Stopping filesystem watcher...")
             self.observer.stop()

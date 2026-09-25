@@ -9,7 +9,7 @@ import time
 from typing import Any, Dict, List, Optional
 import httpx
 
-from src.cache import get_cached_spotify_id, set_cached_spotify_id
+from src.cache import aget_cached_spotify_id, aset_cached_spotify_id
 from src.models import (
     LyricsFormat,
     LyricsResult,
@@ -360,7 +360,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
         """Resolve Spotify track ID from audio tags, cache, Spotify Web API, anonymous Pathfinder, or MusicBrainz."""
         # 1. Direct tag in TrackMetadata
         if track.spotify_id and re.fullmatch(r"^[A-Za-z0-9]{22}$", track.spotify_id):
-            set_cached_spotify_id(
+            await aset_cached_spotify_id(
                 track.clean_artist or track.artist,
                 track.clean_title or track.title,
                 track.spotify_id,
@@ -369,7 +369,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
             return track.spotify_id
 
         # 2. Fast cache lookup (in-memory dict and SQLite database)
-        cached_id = get_cached_spotify_id(
+        cached_id = await aget_cached_spotify_id(
             artist=track.clean_artist or track.artist,
             title=track.clean_title or track.title,
             isrc=track.isrc,
@@ -386,7 +386,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
             track_id = await self._search_spotify_api(track)
             if track_id:
                 track.spotify_id = track_id
-                set_cached_spotify_id(
+                await aset_cached_spotify_id(
                     track.clean_artist or track.artist,
                     track.clean_title or track.title,
                     track_id,
@@ -398,7 +398,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
         anon_id = await self._search_spotify_anonymous(track)
         if anon_id:
             track.spotify_id = anon_id
-            set_cached_spotify_id(
+            await aset_cached_spotify_id(
                 track.clean_artist or track.artist,
                 track.clean_title or track.title,
                 anon_id,
@@ -411,7 +411,7 @@ class SpicyLyricsProvider(BaseLyricsProvider):
             mb_id = await self._search_musicbrainz_isrc(track.isrc)
             if mb_id:
                 track.spotify_id = mb_id
-                set_cached_spotify_id(
+                await aset_cached_spotify_id(
                     track.clean_artist or track.artist,
                     track.clean_title or track.title,
                     mb_id,
