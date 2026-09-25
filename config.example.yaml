@@ -32,6 +32,10 @@ upgrade_quality: true
 # Dry run mode: search and log without saving any files to disk
 dry_run: false
 
+# Restore explicit words masked by lyrics databases (f**k, b***h, n-gga, and Apple Music's
+# "****" filled from other providers' uncensored lyrics). Disable to keep lyrics as delivered.
+uncensor_lyrics: true
+
 # Allow falling back to unsynced plain text lyrics if no synchronized lyrics are found
 allow_plain_lyrics: false
 

@@ -130,6 +130,10 @@ class AppConfig(BaseModel):
         default="sidecar",
         description="Lyrics storage destination: 'sidecar' (companion files), 'embedded' (audio tags), or 'both'",
     )
+    uncensor_lyrics: bool = Field(
+        default=True,
+        description="Restore explicit words masked by lyrics databases (f**k, b***h, n-gga) before saving",
+    )
     embed_word_sync: bool = Field(
         default=True,
         description="Embed word/syllable-level timing (Enhanced LRC <mm:ss.xx> and SYLT words) into audio tags when available",
@@ -287,6 +291,7 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "NLA_STORAGE_MODE": "storage_mode",
         "STORAGE_MODE": "storage_mode",
         "NLA_EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
+        "NLA_UNCENSOR_LYRICS": ("uncensor_lyrics", lambda v: v.lower() in ("true", "1", "yes")),
         "EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
         "OUTPUT_DIR": ("output_dir", lambda v: Path(v)),

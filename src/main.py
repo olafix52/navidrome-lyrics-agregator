@@ -368,6 +368,72 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
         await matcher.close()
 
 
+async def run_uncensor_command(args: argparse.Namespace, config) -> None:
+    """Restore masked explicit words (f**k, b***h, n-gga, ****) in existing lyrics sidecar files.
+
+    Pattern-masked words are restored offline. Fully masked words (Apple Music's "****")
+    are filled from other providers' uncensored lyrics unless --offline is given.
+    """
+    import os
+    import uuid
+    from types import SimpleNamespace
+    from src.audit import get_track_stem_and_format
+    from src.scanner import LibraryScanner
+    from src.tag_reader import SUPPORTED_AUDIO_EXTENSIONS, read_track_metadata
+    from src.uncensor import has_masked_words, uncensor_lyrics_content
+
+    offline = bool(getattr(args, "offline", False))
+    matcher = None if offline else LyricsMatcher(config, build_provider_cascade(config))
+
+    target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
+    roots = [Path(target_str) if target_str else Path(config.music_dir)]
+    if not target_str and config.output_dir:
+        roots.append(Path(config.output_dir))
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    changed_files, restored_words = 0, 0
+    for root in roots:
+        candidates = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+        for path in candidates:
+            parsed = get_track_stem_and_format(path)
+            if not parsed:
+                continue
+            try:
+                original = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning(f"Skipping unreadable lyrics file {path}: {e}")
+                continue
+            restored, count = uncensor_lyrics_content(original, parsed[1])
+            if matcher is not None and has_masked_words(restored):
+                audio = next(
+                    (path.with_name(parsed[0] + ext) for ext in sorted(SUPPORTED_AUDIO_EXTENSIONS)
+                     if path.with_name(parsed[0] + ext).is_file()),
+                    None,
+                )
+                track = read_track_metadata(audio) if audio else None
+                if track is not None:
+                    doc = SimpleNamespace(content=restored, format=parsed[1])
+                    count += await matcher.uncensor(track, doc)
+                    restored = doc.content
+            if not count:
+                continue
+            changed_files += 1
+            restored_words += count
+            console.print(f"  [cyan]{count:3d}[/cyan] word(s)  {path}")
+            if dry_run:
+                continue
+            tmp = path.with_name(f".{path.name}.tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}")
+            tmp.write_text(restored, encoding="utf-8")
+            tmp.replace(path)
+
+    if matcher is not None:
+        await matcher.close()
+    verb = "would be restored" if dry_run else "restored"
+    console.print(f"[bold green]{restored_words} masked word(s) {verb} in {changed_files} file(s).[/bold green]")
+    if changed_files and not dry_run:
+        await LibraryScanner(config, None)._maybe_trigger_navidrome_scan(changed_files)
+
+
 async def run_prune_command(args: argparse.Namespace, config) -> None:
     """Execute library pruning of orphaned lyrics and obsolete lower-quality duplicates."""
     target_str = getattr(args, "path", None) or getattr(args, "music_dir", None)
@@ -719,6 +785,13 @@ def build_parser() -> argparse.ArgumentParser:
     prune_p.add_argument("--orphans-only", action="store_true", help="Only delete orphaned sidecars without audio")
     prune_p.add_argument("--duplicates-only", action="store_true", help="Only delete duplicate lower-quality sidecars")
 
+    # UNCENSOR subcommand
+    uncensor_p = subparsers.add_parser("uncensor", help="Restore masked explicit words (f**k, n-gga) in existing lyrics files")
+    uncensor_p.add_argument("path", nargs="?", type=str, help="Folder or lyrics file (default: music directory)")
+    uncensor_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
+    uncensor_p.add_argument("--dry-run", action="store_true", help="Only report what would change")
+    uncensor_p.add_argument("--offline", action="store_true", help="Only restore pattern-masked words (no provider lookups for '****')")
+
     # TRIGGER-SCAN subcommand
     trigger_p = subparsers.add_parser("trigger-scan", help="Trigger a library scan on the Navidrome server")
     trigger_p.add_argument("--full", action="store_true", help="Request full rescan instead of quick scan")
@@ -860,6 +933,8 @@ def main() -> None:
             await run_upgrade_command(args, config)
         elif command == "prune":
             await run_prune_command(args, config)
+        elif command == "uncensor":
+            await run_uncensor_command(args, config)
         elif command in ("web", "dashboard"):
             await run_web_command(args, config)
         elif command == "trigger-scan":

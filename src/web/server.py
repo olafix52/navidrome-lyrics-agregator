@@ -22,6 +22,7 @@ from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
 from src.storage import get_existing_lyrics_file, save_lyrics_for_track
 from src.tag_reader import is_supported_audio_file
+from src.uncensor import uncensor_lyrics_content
 from src.web.library_index import LibraryIndex, cached_track_tags
 from src.web.parser import karaoke_to_ttml, parse_lyrics_to_karaoke
 
@@ -476,12 +477,15 @@ def create_app(
             fmt = LyricsFormat.LRC
 
         from src.models import detect_sync_type
-        sync_type = detect_sync_type(req.content, fmt)
+        content = req.content
+        if app.state.config.uncensor_lyrics:
+            content, _ = uncensor_lyrics_content(content, fmt)
+        sync_type = detect_sync_type(content, fmt)
 
         lyrics_result = LyricsResult(
             format=fmt,
             sync_type=sync_type,
-            content=req.content,
+            content=content,
             title=tags["title"] if tags else audio_path.stem,
             artist=tags["artist"] if tags else "",
             duration=tags["duration"] if tags else 0.0,

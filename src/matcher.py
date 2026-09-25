@@ -15,6 +15,7 @@ from src.models import (
     TrackMetadata,
 )
 from src.normalizer import verify_track_match
+from src.uncensor import has_masked_words, restore_from_references, uncensor_lyrics_content
 from src.web.parser import count_lyric_lines
 from src.providers.base import BaseLyricsProvider, FetchScope
 from src.storage import (
@@ -340,6 +341,11 @@ class LyricsMatcher:
                 # only populate the audio tags.
                 save_mode = StorageMode.EMBEDDED.value
 
+            if getattr(self.config, "uncensor_lyrics", False):
+                restored = await self.uncensor(track, lyrics, exclude=provider_name)
+                if restored:
+                    logger.info(f"[UNCENSOR] {track.display_name()}: restored {restored} masked word(s)")
+
             # Remove from negative cache if previously cached
             if write_cache:
                 await self.cache.remove(track)
@@ -396,6 +402,58 @@ class LyricsMatcher:
     def _negative_recheck(self, track: TrackMetadata, scope: Optional[str]) -> Tuple[float, str]:
         """(recheck_after, cache_key) of a negative entry just recorded for ``track``."""
         return time.time() + self.cache.ttl_days * 86400.0, self.cache.get_cache_key(track, scope=scope)
+
+    async def uncensor(self, track: TrackMetadata, lyrics: Any, exclude: Optional[str] = None) -> int:
+        """Restore masked explicit words in ``lyrics.content`` in place. Returns words restored.
+
+        1. Pattern restoration (``f**k``, ``b***h``, ``n-gga``) needs no network.
+        2. Words masked without any hint (Apple Music's fixed ``****`` for the n-word) are
+           filled from the uncensored text of other providers, queried in order of how
+           reliably they carry uncensored lyrics, until nothing masked is left.
+        """
+        content, restored = uncensor_lyrics_content(lyrics.content, lyrics.format)
+        if has_masked_words(content):
+            with FetchScope().activate():
+                for provider in self._reference_providers(exclude):
+                    try:
+                        ref = await asyncio.wait_for(_provider_fetch(provider, track), timeout=20.0)
+                    except Exception as e:
+                        logger.debug(f"[UNCENSOR] reference {provider.name} failed: {e}")
+                        continue
+                    if not ref or not ref.content or not self._is_same_song(track, ref):
+                        continue
+                    content, count = restore_from_references(content, lyrics.format, [ref.content])
+                    restored += count
+                    if not has_masked_words(content):
+                        break
+        lyrics.content = content
+        return restored
+
+    # Sources that usually carry uncensored text, best first; others follow in cascade order.
+    _REFERENCE_PREFERENCE = ("lrclib", "musixmatch", "genius", "netease", "kugou", "qqmusic")
+
+    def _reference_providers(self, exclude: Optional[str]) -> List[BaseLyricsProvider]:
+        from src.providers.blends import _BaseBlendProvider  # blends reuse Apple text (masked)
+
+        candidates = [
+            p for p in self.providers
+            if p.name != exclude and not isinstance(p, _BaseBlendProvider)
+        ]
+        order = {name: i for i, name in enumerate(self._REFERENCE_PREFERENCE)}
+        return sorted(candidates, key=lambda p: order.get(p.name, len(order)))
+
+    def _is_same_song(self, track: TrackMetadata, ref: Any) -> bool:
+        is_match, _, _ = verify_track_match(
+            expected_title=track.clean_title or track.title,
+            expected_artist=track.clean_artist or track.artist,
+            found_title=ref.title,
+            found_artist=ref.artist,
+            expected_duration=track.duration,
+            found_duration=ref.duration,
+            tolerance_seconds=max(5.0, self.config.duration_tolerance_seconds),
+            min_similarity=self.config.min_similarity_score,
+        )
+        return is_match
 
     def _existing_lyrics_state(
         self, track: TrackMetadata, storage_mode: str

@@ -195,7 +195,11 @@ python -m src.main web -p 8080 -d /ścieżka/do/muzyki   # tylko lokalnie (127.0
 # Udostępnienie w sieci wymaga tokena (lub NLA_WEB_TOKEN); otwórz raz http://host:8080/?token=<token>
 python -m src.main web --host 0.0.0.0 --token "$(openssl rand -hex 16)"
 
-# 13. Zarządzanie trwałym negatywnym cache'em SQLite
+# 13. Przywracanie ocenzurowanych słów (f**k, n-gga, ****) w istniejących plikach tekstów
+python -m src.main uncensor --dry-run
+python -m src.main uncensor
+
+# 14. Zarządzanie trwałym negatywnym cache'em SQLite
 python -m src.main cache --stats
 python -m src.main cache --prune
 python -m src.main cache --clear
