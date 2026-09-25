@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Tuple, TypeVar
 from src.cache import LyricsCache, get_cached_spotify_id
 from src.config import AppConfig
 from src.models import (
@@ -17,6 +17,51 @@ from src.providers.base import BaseLyricsProvider
 from src.storage import save_lyrics_for_track, should_skip_track
 
 logger = logging.getLogger("nla.matcher")
+
+T = TypeVar("T")
+
+
+class SingleFlight:
+    """Coalesces concurrent in-flight asynchronous operations with identical keys.
+    
+    Prevents stampedes on external providers when identical tracks (e.g. across compilations,
+    duplicate albums, or multi-format libraries) are processed concurrently.
+    """
+
+    def __init__(self) -> None:
+        self._in_flight: Dict[str, asyncio.Future[Any]] = {}
+        self._lock = asyncio.Lock()
+        self.stats_coalesced: int = 0
+        self.stats_total: int = 0
+
+    async def execute(self, key: str, fn: Callable[[], Coroutine[Any, Any, T]]) -> T:
+        async with self._lock:
+            self.stats_total += 1
+            if key in self._in_flight:
+                self.stats_coalesced += 1
+                fut = self._in_flight[key]
+                is_leader = False
+            else:
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                self._in_flight[key] = fut
+                is_leader = True
+
+        if not is_leader:
+            return await fut
+
+        try:
+            result = await fn()
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            async with self._lock:
+                self._in_flight.pop(key, None)
 
 
 class LyricsMatcher:
@@ -38,6 +83,102 @@ class LyricsMatcher:
             )
         self._search_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
         self._cache_ttl = 600.0  # 10 minutes cache TTL
+        self._single_flight = SingleFlight()
+
+    async def _fetch_best_lyrics(
+        self, track: TrackMetadata
+    ) -> Tuple[Optional[Tuple[Any, str, float]], List[str], bool, Tuple[float, int]]:
+        """Fetch best lyrics from providers cascade without performing disk I/O."""
+        ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
+        if self.cache and not ignore_cache:
+            hit = await self.cache.is_negative_hit(track)
+            if hit:
+                return None, [], True, (hit.remaining_days, hit.failure_count)
+
+        logger.info(f"[SEARCHING] {track.display_name()} ({track.duration:.1f}s)")
+
+        # Pre-populate Spotify ID from cache if missing
+        if not track.spotify_id:
+            cached_sp = get_cached_spotify_id(
+                artist=track.clean_artist or track.artist,
+                title=track.clean_title or track.title,
+                isrc=track.isrc,
+            )
+            if cached_sp:
+                track.spotify_id = cached_sp
+
+        best_match: Optional[Tuple[Any, str, float]] = None
+        remaining_word_sync_budget = getattr(self.config, "word_sync_search_budget", None)
+        early_exit = getattr(self.config, "early_exit_on_line_sync", False)
+        providers_queried: List[str] = []
+
+        for provider in self.providers:
+            # Skip plain-only providers if allow_plain_lyrics is False
+            if not self.config.allow_plain_lyrics and not getattr(provider, "supports_line_sync", True) and not getattr(provider, "supports_word_sync", True):
+                logger.debug(f"[{provider.name}] Skipping: plain lyrics disabled (allow_plain_lyrics=False)")
+                continue
+
+            # If we already matched LINE_SYNC, optimize the remaining cascade
+            if best_match and best_match[0].sync_type == LyricsSyncType.LINE_SYNC:
+                if early_exit:
+                    logger.debug(f"[CASCADE] Early exit on line-sync active, ending cascade before {provider.name}")
+                    break
+
+                if not getattr(provider, "supports_word_sync", True):
+                    logger.debug(f"[{provider.name}] Skipping: cannot produce word-sync and line-sync already matched")
+                    continue
+
+                if remaining_word_sync_budget is not None:
+                    if remaining_word_sync_budget <= 0:
+                        logger.debug(f"[CASCADE] Word-sync search budget reached, ending cascade before {provider.name}")
+                        break
+                    remaining_word_sync_budget -= 1
+
+            providers_queried.append(provider.name)
+            try:
+                logger.debug(f"[{provider.name}] Querying for '{track.display_name()}'...")
+                lyrics = await provider.get_lyrics(track)
+
+                if not lyrics or not lyrics.content:
+                    continue
+
+                if lyrics.sync_type == LyricsSyncType.UNSYNCED and not self.config.allow_plain_lyrics:
+                    logger.debug(f"[{provider.name}] Plain lyrics ignored (allow_plain_lyrics=False)")
+                    continue
+
+                is_match, score, reason = verify_track_match(
+                    expected_title=track.clean_title or track.title,
+                    expected_artist=track.clean_artist or track.artist,
+                    found_title=lyrics.title,
+                    found_artist=lyrics.artist,
+                    expected_duration=track.duration,
+                    found_duration=lyrics.duration,
+                    tolerance_seconds=self.config.duration_tolerance_seconds,
+                    min_similarity=self.config.min_similarity_score,
+                )
+
+                if not is_match:
+                    logger.debug(f"[{provider.name}] Match rejected: {reason}")
+                    continue
+
+                lyrics.match_score = score
+
+                if lyrics.sync_type == LyricsSyncType.WORD_SYNC:
+                    best_match = (lyrics, provider.name, score)
+                    break
+
+                if lyrics.sync_type == LyricsSyncType.LINE_SYNC:
+                    if not best_match or best_match[0].sync_type == LyricsSyncType.UNSYNCED:
+                        best_match = (lyrics, provider.name, score)
+                    continue
+
+                if not best_match:
+                    best_match = (lyrics, provider.name, score)
+
+            except Exception as e:
+                logger.warning(f"[{provider.name}] Exception while processing {track.display_name()}: {e}")
+
+        return best_match, providers_queried, False, (0.0, 0)
 
     async def process_track(self, track: TrackMetadata) -> ProcessResult:
         """Process a single audio track: check existing sidecar, query providers, verify, and save."""
@@ -57,116 +198,32 @@ class LyricsMatcher:
                 error_message=skip_reason,
             )
 
-        # 2. Check persistent negative cache (skip previously unfound tracks without network calls)
-        ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
-        if self.cache and not ignore_cache:
-            hit = await self.cache.is_negative_hit(track)
-            if hit:
-                logger.debug(
-                    f"[CACHE HIT - NEGATIVE] {track.display_name()} - skipped (no lyrics found on previous scan, "
-                    f"TTL remaining: {hit.remaining_days:.1f}d, fail count: {hit.failure_count})"
-                )
-                return ProcessResult(
-                    file_path=track.file_path,
-                    status=MatchStatus.SKIPPED,
-                    error_message=f"Negative cache: no lyrics found across providers ({hit.remaining_days:.1f}d remaining)",
-                )
+        # SingleFlight: coalesce concurrent in-flight queries for identical tracks
+        flight_key = (
+            f"{(track.clean_artist or track.artist).strip().lower()}:"
+            f"{(track.clean_title or track.title).strip().lower()}:"
+            f"{int(round(track.duration or 0))}"
+        )
 
-        logger.info(f"[SEARCHING] {track.display_name()} ({track.duration:.1f}s)")
+        best_match, providers_queried, is_negative_hit, neg_hit_info = await self._single_flight.execute(
+            flight_key,
+            lambda: self._fetch_best_lyrics(track),
+        )
 
-        # Pre-populate Spotify ID from cache if missing
-        if not track.spotify_id:
-            cached_sp = get_cached_spotify_id(
-                artist=track.clean_artist or track.artist,
-                title=track.clean_title or track.title,
-                isrc=track.isrc,
+        if is_negative_hit:
+            remaining_days, failure_count = neg_hit_info
+            logger.debug(
+                f"[CACHE HIT - NEGATIVE] {track.display_name()} - skipped (no lyrics found on previous scan, "
+                f"TTL remaining: {remaining_days:.1f}d, fail count: {failure_count})"
             )
-            if cached_sp:
-                track.spotify_id = cached_sp
-
-        # 3. Iterate through provider cascade with quality priority (WORD_SYNC > LINE_SYNC > UNSYNCED)
-        best_match = None  # Tuple[LyricsResult, BaseLyricsProvider, float]
-        remaining_word_sync_budget = getattr(self.config, "word_sync_search_budget", None)
-        early_exit = getattr(self.config, "early_exit_on_line_sync", False)
-        providers_queried: List[str] = []
-
-        for provider in self.providers:
-            # Skip plain-only providers if allow_plain_lyrics is False
-            if not self.config.allow_plain_lyrics and not getattr(provider, "supports_line_sync", True) and not getattr(provider, "supports_word_sync", True):
-                logger.debug(f"[{provider.name}] Skipping: plain lyrics disabled (allow_plain_lyrics=False)")
-                continue
-
-            # If we already matched LINE_SYNC, optimize the remaining cascade
-            if best_match and best_match[0].sync_type == LyricsSyncType.LINE_SYNC:
-                # 1. Early exit flag: stop immediately once line sync is in hand
-                if early_exit:
-                    logger.debug(f"[CASCADE] Early exit on line-sync active, ending cascade before {provider.name}")
-                    break
-
-                # 2. Capability pruning: skip providers that cannot produce word-sync
-                if not getattr(provider, "supports_word_sync", True):
-                    logger.debug(f"[{provider.name}] Skipping: cannot produce word-sync and line-sync already matched")
-                    continue
-
-                # 3. Budget enforcement: stop if word-sync budget exhausted
-                if remaining_word_sync_budget is not None:
-                    if remaining_word_sync_budget <= 0:
-                        logger.debug(f"[CASCADE] Word-sync search budget reached, ending cascade before {provider.name}")
-                        break
-                    remaining_word_sync_budget -= 1
-
-            providers_queried.append(provider.name)
-            try:
-                logger.debug(f"[{provider.name}] Querying for '{track.display_name()}'...")
-                lyrics = await provider.get_lyrics(track)
-
-                if not lyrics or not lyrics.content:
-                    continue
-
-                # Plain lyrics check
-                if lyrics.sync_type == LyricsSyncType.UNSYNCED and not self.config.allow_plain_lyrics:
-                    logger.debug(f"[{provider.name}] Plain lyrics ignored (allow_plain_lyrics=False)")
-                    continue
-
-                # Verify match (duration + similarity)
-                is_match, score, reason = verify_track_match(
-                    expected_title=track.clean_title or track.title,
-                    expected_artist=track.clean_artist or track.artist,
-                    found_title=lyrics.title,
-                    found_artist=lyrics.artist,
-                    expected_duration=track.duration,
-                    found_duration=lyrics.duration,
-                    tolerance_seconds=self.config.duration_tolerance_seconds,
-                    min_similarity=self.config.min_similarity_score,
-                )
-
-                if not is_match:
-                    logger.debug(f"[{provider.name}] Match rejected: {reason}")
-                    continue
-
-                lyrics.match_score = score
-
-                # 1. Top Tier: Word-level synchronization (TTML with spans or lyricsfile YAML)
-                if lyrics.sync_type == LyricsSyncType.WORD_SYNC:
-                    best_match = (lyrics, provider, score)
-                    break  # Maximum possible quality found, stop searching
-
-                # 2. Middle Tier: Line-level synchronization (LRC or line-only TTML)
-                if lyrics.sync_type == LyricsSyncType.LINE_SYNC:
-                    if not best_match or best_match[0].sync_type == LyricsSyncType.UNSYNCED:
-                        best_match = (lyrics, provider, score)
-                    # Continue cascade to check if any remaining provider has WORD_SYNC
-                    continue
-
-                # 3. Lowest Tier: Plain unsynced text
-                if not best_match:
-                    best_match = (lyrics, provider, score)
-
-            except Exception as e:
-                logger.warning(f"[{provider.name}] Exception while processing {track.display_name()}: {e}")
+            return ProcessResult(
+                file_path=track.file_path,
+                status=MatchStatus.SKIPPED,
+                error_message=f"Negative cache: no lyrics found across providers ({remaining_days:.1f}d remaining)",
+            )
 
         if best_match:
-            lyrics, provider, score = best_match
+            lyrics, provider_name, score = best_match
 
             # Remove from negative cache if previously cached
             if self.cache:
@@ -192,13 +249,13 @@ class LyricsMatcher:
 
             logger.info(
                 f"[FOUND] {track.display_name()} -> {lyrics.format.value.upper()} ({lyrics.sync_type.value}) "
-                f"via {provider.name} (score: {score:.2f}) -> {dest_str}"
+                f"via {provider_name} (score: {score:.2f}) -> {dest_str}"
             )
 
             return ProcessResult(
                 file_path=track.file_path,
                 status=MatchStatus.SUCCESS,
-                provider=provider.name,
+                provider=provider_name,
                 format=lyrics.format,
                 target_file=target_path,
                 embedded=was_embedded,
@@ -206,7 +263,8 @@ class LyricsMatcher:
             )
 
         # Record in negative cache so subsequent scans skip this track immediately
-        if self.cache and not ignore_cache:
+        ignore_cache = getattr(self.config, "ignore_cache", False) or self.config.overwrite
+        if self.cache and not ignore_cache and providers_queried:
             await self.cache.record_negative(track, providers_checked=providers_queried)
 
         logger.info(f"[NOT FOUND] No matching lyrics found for {track.display_name()}")

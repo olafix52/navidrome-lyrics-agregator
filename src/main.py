@@ -781,6 +781,14 @@ def main() -> None:
         run_providers_command(args, config, config_path)
         return
 
+    if sys.platform != "win32":
+        try:
+            import uvloop
+            uvloop.install()
+            logger.debug("High-performance uvloop event loop policy installed")
+        except ImportError:
+            pass
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 

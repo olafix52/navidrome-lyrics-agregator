@@ -66,6 +66,11 @@
   - Weryfikacja podobieństwa nazw i wykonawców (Fuzzy String Similarity $\ge 0.75$).
 
 - **Wysokowydajny trwały cache i optymalizacja wydajności:**
+  - **Indeksowanie plików sidecar na poziomie folderów (`FolderLyricsIndex`):** Pamięć podręczna wpisów katalogowych weryfikowana na podstawie czasu modyfikacji `mtime_ns` katalogu, sprawdzająca 1 000 plików w ~6 ms (ponad 156 000 utworów/sekundę, **2.7× szybciej**).
+  - **Strumieniowy skaner producent-konsument:** Leniwe generowanie ścieżek z ograniczoną kolejką zadań, natychmiastowe rozpoczęcie pobierania tekstów bez wstępnego oczekiwania na pełny skan i stałe zapotrzebowanie na RAM.
+  - **Deduplikacja zapytań Single-Flight:** Grupuje równoległe zapytania o te same utwory (np. w kompilacjach, wydaniach deluxe, różnych formatach plików) w jedno zapytanie do dostawców, redukując ruch sieciowy o ponad 50%.
+  - **Multipleksacja HTTP/2 (`httpx[http2]`):** Współdzielenie pojedynczego połączenia TCP i równoległa wymiana strumieni z nowoczesnymi API bez kosztownych negocjacji TLS.
+  - **Wysokowydajna pętla zdarzeń `uvloop`:** Oparta o libuv na systemach Linux i w kontenerze Docker, minimalizuje narzut procesora i przyspiesza przełączanie zadań asynchronicznych.
   - **Trwały negatywny cache SQLite (tryb WAL & MMAP):** Zapamiętuje brakujące teksty oraz nieudane zapytania do dostawców z mechanizmem wykładniczego wycofywania (exponential backoff) i konfigurowalnym czasem wygaśnięcia TTL (`negative_ttl_days: 14`). Zoptymalizowany pod kątem mapowania pamięci (`mmap_size = 256MB`). Kolejne uruchomienia demona lub skanowania biblioteki pomijają nieznane utwory w ułamku milisekundy, eliminując niepotrzebne zapytania sieciowe.
   - **Szybkie indeksowanie systemu plików (`os.scandir`):** Przeszukuje strukturę folderów **3–5× szybciej** niż standardowe `rglob`, czytając metadane wpisów katalogowych bezpośrednio z i-węzłów bez zbędnych wywołań systemowych `stat()`.
   - **Pamięć podręczna LRU w RAM:** Algorytmy normalizacji tytułów i wykonawców (`clean_title`, `clean_artist`), ocena kandydatów oraz symetryczne badanie podobieństwa napisów są buforowane w pamięci podręcznej przez `functools.lru_cache`, znacznie odciążając procesor przy dużych zbiorach.

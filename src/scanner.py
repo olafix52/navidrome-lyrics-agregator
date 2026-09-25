@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 
@@ -13,7 +14,7 @@ from src.matcher import LyricsMatcher
 from src.models import MatchStatus, ProcessResult, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.subsonic import SubsonicClient
-from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, read_track_metadata
+from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, iter_discover_audio_files, read_track_metadata
 
 logger = logging.getLogger("nla.scanner")
 
@@ -202,19 +203,123 @@ class LibraryScanner:
         finally:
             await client.close()
 
+    async def _process_stream_bounded(
+        self,
+        file_iterator: Iterable[Path],
+        description: str = "[cyan]Processing tracks...",
+        show_progress: bool = True,
+    ) -> List[ProcessResult]:
+        """Process an iterable stream of audio files concurrently with bounded memory footprint.
+        
+        Uses a producer-consumer architecture so files are processed concurrently
+        as soon as they are found on disk, avoiding massive list allocations.
+        """
+        worker_count = max(1, self.config.concurrency)
+        queue: asyncio.Queue[Optional[Path]] = asyncio.Queue(maxsize=min(500, max(50, worker_count * 10)))
+        results: List[ProcessResult] = []
+        results_lock = asyncio.Lock()
+        stop_event = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        progress: Optional[Progress] = None
+        task_id = None
+
+        if show_progress:
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("({task.completed} tracks)"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            )
+
+        def _produce_sync() -> None:
+            try:
+                for path in file_iterator:
+                    if stop_event.is_set():
+                        break
+                    fut = asyncio.run_coroutine_threadsafe(queue.put(path), loop)
+                    while not stop_event.is_set():
+                        try:
+                            fut.result(timeout=0.1)
+                            break
+                        except Exception:
+                            continue
+                for _ in range(worker_count):
+                    if stop_event.is_set():
+                        break
+                    fut = asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                    while not stop_event.is_set():
+                        try:
+                            fut.result(timeout=0.1)
+                            break
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.error(f"Error streaming audio files: {e}")
+                for _ in range(worker_count):
+                    try:
+                        asyncio.run_coroutine_threadsafe(queue.put(None), loop).result(timeout=0.5)
+                    except Exception:
+                        pass
+
+        async def _worker() -> None:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    queue.task_done()
+                    break
+                try:
+                    res = await self._process_single_file(item)
+                    if isinstance(res, ProcessResult):
+                        async with results_lock:
+                            results.append(res)
+                except Exception as e:
+                    logger.error(f"Task failed for {item}: {e}")
+                finally:
+                    if progress and task_id is not None:
+                        progress.advance(task_id, 1)
+                    queue.task_done()
+
+        try:
+            if progress:
+                with progress:
+                    task_id = progress.add_task(description, total=None)
+                    producer_task = asyncio.to_thread(_produce_sync)
+                    worker_tasks = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+                    await asyncio.gather(producer_task, *worker_tasks)
+            else:
+                producer_task = asyncio.to_thread(_produce_sync)
+                worker_tasks = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+                await asyncio.gather(producer_task, *worker_tasks)
+        finally:
+            stop_event.set()
+
+        self.display_summary(results)
+
+        # Trigger Navidrome scan if new lyrics were downloaded
+        success_count = sum(1 for r in results if r.status == MatchStatus.SUCCESS)
+        await self._maybe_trigger_navidrome_scan(success_count)
+
+        return results
+
     async def scan_and_process(
         self,
         target_dir: Optional[Path] = None,
         show_progress: bool = True,
     ) -> List[ProcessResult]:
-        """Scan directory and download missing lyrics for all discovered audio files."""
+        """Scan directory and download missing lyrics for all discovered audio files using streaming."""
         root = target_dir or self.config.music_dir
         logger.info(f"Scanning directory for audio tracks: {root}")
 
-        audio_files = self.discover_audio_files(root)
-        logger.info(f"Discovered {len(audio_files)} audio files")
-
-        return await self.process_files(audio_files, show_progress=show_progress)
+        return await self._process_stream_bounded(
+            iter_discover_audio_files(root),
+            description="[cyan]Processing tracks...",
+            show_progress=show_progress,
+        )
 
     async def _process_single_file(self, file_path: Path) -> ProcessResult:
         """Read metadata and invoke lyrics matcher on a single file."""

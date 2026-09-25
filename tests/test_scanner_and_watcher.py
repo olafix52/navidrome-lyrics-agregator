@@ -210,3 +210,42 @@ def test_ttml_rounding_boundary():
     assert format_ttml_timestamp(119.9999) == "02:00.000"
 
 
+def test_iter_discover_audio_files(tmp_path: Path):
+    from src.tag_reader import iter_discover_audio_files
+
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    t1 = album / "01.flac"
+    t2 = album / "02.mp3"
+    t1.write_bytes(b"flac")
+    t2.write_bytes(b"mp3")
+
+    items = list(iter_discover_audio_files(tmp_path))
+    assert len(items) == 2
+    assert t1 in items
+    assert t2 in items
+
+
+@pytest.mark.asyncio
+async def test_scanner_streaming_scan_and_process(tmp_path: Path):
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    t1 = album / "01.flac"
+    t2 = album / "02.mp3"
+    t1.write_bytes(b"flac")
+    t2.write_bytes(b"mp3")
+
+    config = AppConfig(music_dir=tmp_path, concurrency=2)
+    mock_matcher = MagicMock()
+    scanner = LibraryScanner(config, mock_matcher)
+
+    async def _mock_process(fp: Path):
+        return ProcessResult(file_path=fp, status=MatchStatus.SUCCESS, provider="lrclib")
+
+    with patch.object(scanner, "_process_single_file", side_effect=_mock_process):
+        results = await scanner.scan_and_process(show_progress=False)
+        assert len(results) == 2
+        paths = {r.file_path for r in results}
+        assert paths == {t1, t2}
+
+

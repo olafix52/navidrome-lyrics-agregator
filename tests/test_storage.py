@@ -241,3 +241,32 @@ def test_get_existing_lyrics_file_with_output_dir(tmp_path):
     # Should NOT find it when searching audio_path.parent (no output_dir)
     assert get_existing_lyrics_file(audio_file) is None
 
+
+def test_folder_lyrics_index_caching_and_invalidation(tmp_path: Path):
+    """Test FolderLyricsIndex cache lookup, registration, and invalidation."""
+    from src.storage import GLOBAL_FOLDER_INDEX
+
+    folder = tmp_path / "album"
+    folder.mkdir()
+    f1 = folder / "track1.lrc"
+    f1.write_text("[00:01.00] hello")
+
+    # Initial get
+    entries = GLOBAL_FOLDER_INDEX.get_dir_entries(folder)
+    assert "track1.lrc" in entries
+
+    # Direct registration
+    GLOBAL_FOLDER_INDEX.register_file(folder / "track2.ttml", 123)
+    assert "track2.ttml" in GLOBAL_FOLDER_INDEX.get_dir_entries(folder)
+
+    # Direct unregistration
+    GLOBAL_FOLDER_INDEX.unregister_file(folder / "track2.ttml")
+    assert "track2.ttml" not in GLOBAL_FOLDER_INDEX.get_dir_entries(folder)
+
+    # Clear/invalidate
+    GLOBAL_FOLDER_INDEX.invalidate()
+    assert GLOBAL_FOLDER_INDEX._cache == {}
+    entries_reloaded = GLOBAL_FOLDER_INDEX.get_dir_entries(folder)
+    assert "track1.lrc" in entries_reloaded
+
+

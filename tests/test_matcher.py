@@ -1,5 +1,6 @@
 """Unit tests for the lyrics matcher and cascade orchestration."""
 
+import asyncio
 from pathlib import Path
 import pytest
 from src.config import AppConfig
@@ -405,4 +406,84 @@ async def test_matcher_invalidates_negative_cache_on_success(tmp_path: Path):
     assert res.status == MatchStatus.SUCCESS
     # Negative cache entry must now be deleted
     assert await cache.is_negative_hit(track) is None
+
+
+@pytest.mark.asyncio
+async def test_single_flight_coalescing():
+    from src.matcher import SingleFlight
+
+    sf = SingleFlight()
+    call_count = 0
+
+    async def _slow_operation(val: int):
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.05)
+        return val * 2
+
+    # Launch 5 concurrent calls with the same key
+    results = await asyncio.gather(
+        sf.execute("k1", lambda: _slow_operation(10)),
+        sf.execute("k1", lambda: _slow_operation(10)),
+        sf.execute("k1", lambda: _slow_operation(10)),
+        sf.execute("k1", lambda: _slow_operation(10)),
+        sf.execute("k1", lambda: _slow_operation(10)),
+    )
+
+    assert results == [20, 20, 20, 20, 20]
+    assert call_count == 1  # Only 1 execution occurred!
+    assert sf.stats_total == 5
+    assert sf.stats_coalesced == 4
+
+
+@pytest.mark.asyncio
+async def test_matcher_single_flight_duplicate_tracks(tmp_path: Path):
+    """Test that two files with identical track metadata trigger provider queries only once."""
+    file1 = tmp_path / "song1.flac"
+    file2 = tmp_path / "song2.mp3"
+    file1.write_bytes(b"dummy1")
+    file2.write_bytes(b"dummy2")
+
+    track1 = TrackMetadata(file_path=file1, title="Bohemian Rhapsody", artist="Queen", duration=354.0)
+    track2 = TrackMetadata(file_path=file2, title="Bohemian Rhapsody", artist="Queen", duration=354.0)
+
+    query_count = 0
+
+    class CountingProvider(BaseLyricsProvider):
+        def __init__(self):
+            super().__init__()
+            self.name = "counting"
+
+        async def get_lyrics(self, track: TrackMetadata):
+            nonlocal query_count
+            query_count += 1
+            await asyncio.sleep(0.02)  # Simulate network latency
+            return LyricsResult(
+                content="[00:01.00]Mama",
+                format=LyricsFormat.LRC,
+                sync_type=LyricsSyncType.LINE_SYNC,
+                provider_name="counting",
+                duration=354.0,
+                title="Bohemian Rhapsody",
+                artist="Queen",
+            )
+
+    provider = CountingProvider()
+    config = AppConfig(music_dir=tmp_path)
+    matcher = LyricsMatcher(config, [provider])
+
+    # Run both concurrently
+    res1, res2 = await asyncio.gather(
+        matcher.process_track(track1),
+        matcher.process_track(track2),
+    )
+
+    assert res1.status == MatchStatus.SUCCESS
+    assert res2.status == MatchStatus.SUCCESS
+    # Exactly one network query made
+    assert query_count == 1
+    # Both files received sidecars
+    assert (tmp_path / "song1.lrc").exists()
+    assert (tmp_path / "song2.lrc").exists()
+
 

@@ -12,6 +12,12 @@ from src.rate_limiter import AsyncRateLimiter
 
 logger = logging.getLogger("nla.providers")
 
+try:
+    import h2
+    _HTTP2_AVAILABLE = True
+except ImportError:
+    _HTTP2_AVAILABLE = False
+
 
 class BaseLyricsProvider(ABC):
     """Base abstract class for all lyrics providers."""
@@ -36,7 +42,7 @@ class BaseLyricsProvider(ABC):
         self._client: Optional[httpx.AsyncClient] = None
 
     async def get_client(self) -> httpx.AsyncClient:
-        """Get or initialize the persistent async HTTP client."""
+        """Get or initialize the persistent async HTTP client with HTTP/2 support."""
         if self._client is None or self._client.is_closed:
             headers = {
                 "User-Agent": self.user_agent,
@@ -46,6 +52,7 @@ class BaseLyricsProvider(ABC):
                 headers=headers,
                 timeout=httpx.Timeout(self.timeout, connect=5.0),
                 follow_redirects=True,
+                http2=_HTTP2_AVAILABLE,
                 limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
             )
         return self._client

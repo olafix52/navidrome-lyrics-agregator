@@ -4,7 +4,7 @@ import logging
 import re
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, Iterator, List, Optional, Union
 import mutagen
 from mutagen.mp4 import MP4
 
@@ -42,20 +42,21 @@ def is_supported_audio_file(file_path: Union[Path, str]) -> bool:
     return file_path.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
 
 
-def fast_discover_audio_files(root_dir: Path) -> List[Path]:
-    """Find all supported audio files in target directory recursively using fast os.scandir.
+def iter_discover_audio_files(root_dir: Path) -> Iterator[Path]:
+    """Yield all supported audio files in target directory recursively using fast os.scandir.
     
-    Bypasses expensive recursive Path.rglob allocations and dirent stat calls,
-    yielding 3-5x faster directory traversal on large libraries.
+    Streams paths lazily without allocating a massive in-memory list,
+    enabling constant-memory producer-consumer pipelines.
     """
     if not root_dir.exists():
         logger.error(f"Music directory does not exist: {root_dir}")
-        return []
+        return
 
     if root_dir.is_file():
-        return [root_dir] if is_supported_audio_file(root_dir) else []
+        if is_supported_audio_file(root_dir):
+            yield root_dir
+        return
 
-    audio_files: List[Path] = []
     stack: List[str] = [str(root_dir)]
 
     while stack:
@@ -69,14 +70,21 @@ def fast_discover_audio_files(root_dir: Path) -> List[Path]:
                         elif entry.is_file(follow_symlinks=False):
                             dot_idx = entry.name.rfind(".")
                             if dot_idx != -1 and entry.name[dot_idx:].lower() in SUPPORTED_AUDIO_EXTENSIONS:
-                                audio_files.append(Path(entry.path))
+                                yield Path(entry.path)
                     except (PermissionError, FileNotFoundError, OSError):
                         continue
         except (PermissionError, FileNotFoundError, OSError) as e:
             logger.debug(f"Error scanning directory {current}: {e}")
             continue
 
-    return sorted(audio_files)
+
+def fast_discover_audio_files(root_dir: Path) -> List[Path]:
+    """Find all supported audio files in target directory recursively using fast os.scandir.
+    
+    Bypasses expensive recursive Path.rglob allocations and dirent stat calls,
+    yielding 3-5x faster directory traversal on large libraries.
+    """
+    return sorted(iter_discover_audio_files(root_dir))
 
 
 def _get_first_tag_value(tags: Any, keys: List[str]) -> Optional[str]:
