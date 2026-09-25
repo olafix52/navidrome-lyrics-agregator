@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Main CLI entry point for Navidrome Lyrics Aggregator."""
 
 import argparse
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.audit import LibraryAuditor, LibraryPruner
-from src.config import load_config
+from src.config import AppConfig, load_config
 from src.logger import console, setup_logger
 from src.matcher import LyricsMatcher
 from src.models import LyricsFormat, TrackMetadata
