@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+from src.models import LyricsFormat, LyricsResult, LyricsSyncType
+from src.tag_writer import _karaoke_lines_to_lrc, _karaoke_lines_to_plain
+from src.ttml import build_ttml
+from src.web.parser import parse_yaml_to_karaoke
+
 
 class LyricsfileWord(BaseModel):
     """Word-level timing within a line."""
@@ -132,3 +137,63 @@ def validate_lyricsfile_yaml(yaml_str: str) -> Optional[LyricsfileDocument]:
         return LyricsfileDocument(**data)
     except Exception:
         return None
+
+
+def _ttml_tokens(line_text: str, words: List[Any]) -> List[Dict[str, Any]]:
+    """TTML tokens for a line's timed words.
+
+    TTML keeps no whitespace between word spans, so the spacing of the line text is
+    carried inside the tokens (Lyricsfile words may or may not include it).
+    """
+    tokens: List[Dict[str, Any]] = []
+    pos = 0
+    for w in words:
+        text = w.text
+        core = text.strip()
+        found = line_text.find(core, pos) if core else -1
+        if found >= 0:
+            end = found + len(core)
+            while end < len(line_text) and line_text[end].isspace():
+                end += 1
+            text = core + line_text[found + len(core):end]
+            pos = end
+        tokens.append({"start_s": w.start, "end_s": w.end, "text": text})
+    return tokens
+
+
+def convert_lyricsfile_result(lyrics: LyricsResult) -> LyricsResult:
+    """Re-encode Lyricsfile YAML lyrics in a common format, keeping their timing precision.
+
+    Word-synced documents become TTML, line-synced ones LRC and unsynced ones TXT.
+    Anything that is not YAML, or cannot be parsed, is returned unchanged.
+    """
+    if lyrics.format != LyricsFormat.YAML:
+        return lyrics
+
+    lines = parse_yaml_to_karaoke(lyrics.content)
+    if not lines:
+        return lyrics
+
+    if any(line.words for line in lines):
+        ttml_lines = []
+        for line in lines:
+            start = line.start if line.start is not None else (line.words[0].start if line.words else 0.0)
+            end = line.end if line.end is not None else (line.words[-1].end if line.words else start)
+            ttml_lines.append({
+                "start_s": start,
+                "end_s": end,
+                "text": line.text,
+                "tokens": _ttml_tokens(line.text, line.words) if line.words else [],
+            })
+        content = build_ttml(ttml_lines, title=lyrics.title or "", artist=lyrics.artist or "")
+        fmt, sync_type = LyricsFormat.TTML, LyricsSyncType.WORD_SYNC
+    elif any(line.start is not None for line in lines):
+        content = _karaoke_lines_to_lrc(lines, enhanced=False)
+        fmt, sync_type = LyricsFormat.LRC, LyricsSyncType.LINE_SYNC
+    else:
+        content = _karaoke_lines_to_plain(lines)
+        fmt, sync_type = LyricsFormat.TXT, LyricsSyncType.UNSYNCED
+
+    if not content.strip():
+        return lyrics
+    return lyrics.model_copy(update={"content": content, "format": fmt, "sync_type": sync_type})

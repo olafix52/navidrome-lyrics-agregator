@@ -20,6 +20,7 @@ from src.matcher import LyricsMatcher
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
+from src.lyricsfile import convert_lyricsfile_result
 from src.storage import get_existing_lyrics_file, save_lyrics_for_track
 from src.tag_reader import is_supported_audio_file
 from src.uncensor import uncensor_lyrics_content
@@ -491,6 +492,8 @@ def create_app(
             duration=tags["duration"] if tags else 0.0,
             provider_name=req.provider or "manual",
         )
+        if not app.state.config.keep_lyricsfile_yaml:
+            lyrics_result = convert_lyricsfile_result(lyrics_result)
 
         # Same destination rules as the scanner: storage_mode + mirrored output_dir
         cfg = app.state.config

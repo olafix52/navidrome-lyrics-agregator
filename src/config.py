@@ -134,6 +134,11 @@ class AppConfig(BaseModel):
         default=True,
         description="Restore explicit words masked by lyrics databases (f**k, b***h, n-gga) before saving",
     )
+    keep_lyricsfile_yaml: bool = Field(
+        default=False,
+        description="Save Lyricsfile YAML as delivered (.lyricsfile.yaml); when false it is converted "
+        "to TTML (word sync), LRC (line sync) or TXT before saving",
+    )
     embed_word_sync: bool = Field(
         default=True,
         description="Embed word/syllable-level timing (Enhanced LRC <mm:ss.xx> and SYLT words) into audio tags when available",
@@ -292,6 +297,7 @@ def _apply_env_overrides(data: Dict[str, Any]) -> None:
         "STORAGE_MODE": "storage_mode",
         "NLA_EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_UNCENSOR_LYRICS": ("uncensor_lyrics", lambda v: v.lower() in ("true", "1", "yes")),
+        "NLA_KEEP_LYRICSFILE_YAML": ("keep_lyricsfile_yaml", lambda v: v.lower() in ("true", "1", "yes")),
         "EMBED_WORD_SYNC": ("embed_word_sync", lambda v: v.lower() in ("true", "1", "yes")),
         "NLA_OUTPUT_DIR": ("output_dir", lambda v: Path(v)),
         "OUTPUT_DIR": ("output_dir", lambda v: Path(v)),

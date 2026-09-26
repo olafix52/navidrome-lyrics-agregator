@@ -15,6 +15,7 @@ from src.models import (
     TrackMetadata,
 )
 from src.normalizer import verify_track_match
+from src.lyricsfile import convert_lyricsfile_result
 from src.uncensor import has_masked_words, restore_from_references, uncensor_lyrics_content
 from src.web.parser import count_lyric_lines
 from src.providers.base import BaseLyricsProvider, FetchScope
@@ -316,6 +317,10 @@ class LyricsMatcher:
 
         if best_match:
             lyrics, provider_name, score = best_match
+            # Before the quality comparison: the rank must reflect the format actually saved,
+            # or line-synced YAML (ranked above LRC) would rewrite the same LRC on every scan.
+            if not getattr(self.config, "keep_lyricsfile_yaml", False):
+                lyrics = convert_lyricsfile_result(lyrics)
 
             save_mode = storage_mode
             if existing_rank is not None and lyrics_quality_rank(lyrics.sync_type, lyrics.format) <= existing_rank:

@@ -36,6 +36,10 @@ dry_run: false
 # "****" filled from other providers' uncensored lyrics). Disable to keep lyrics as delivered.
 uncensor_lyrics: true
 
+# Lyricsfile YAML from LRCLIB / Unison is converted before saving: word-synced to .ttml,
+# line-synced to .lrc, unsynced to .txt. Set to true to keep .lyricsfile.yaml files instead.
+keep_lyricsfile_yaml: false
+
 # Allow falling back to unsynced plain text lyrics if no synchronized lyrics are found
 allow_plain_lyrics: false
 

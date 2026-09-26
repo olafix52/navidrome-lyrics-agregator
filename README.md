@@ -42,6 +42,7 @@
 
 - **Flexible Storage & Audio Tag Writing (Embedded Lyrics):**
   - **Sidecar files:** Atomic saving of companion files (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) with quality resolution order (`.ttml` > `.yaml` > `.lrc`).
+  - **Lyricsfile YAML conversion:** YAML from LRCLIB / Unison is saved as `.ttml` (word sync), `.lrc` (line sync) or `.txt`; set `keep_lyricsfile_yaml: true` (`NLA_KEEP_LYRICSFILE_YAML=true`) to keep `.lyricsfile.yaml` files.
   - **Enhanced LRC & Word/Syllable Karaoke Timing:**
     - When word-level timing is found (TTML, Lyricsfile YAML), the aggregator embeds **Enhanced LRC (ELRC)** with `<mm:ss.xx>` word timestamps into the `LYRICS` / `USLT` tags.
     - Enables smooth word-by-word karaoke animations in **Feishin** (via OpenSubsonic Song Lyrics v2) and **Symfonium**.

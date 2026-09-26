@@ -42,6 +42,7 @@
 
 - **Elastyczne przechowywanie i zapis w tagach audio (Embedded Lyrics):**
   - **Pliki sidecar:** Atomowy zapis plików towarzyszących (`.ttml`, `.lyricsfile.yaml`, `.lrc`, `.txt`) z hierarchią jakości (`.ttml` > `.yaml` > `.lrc`).
+  - **Konwersja Lyricsfile YAML:** YAML z LRCLIB / Unison zapisywany jest jako `.ttml` (synchronizacja słów), `.lrc` (synchronizacja linii) lub `.txt`; ustaw `keep_lyricsfile_yaml: true` (`NLA_KEEP_LYRICSFILE_YAML=true`), aby zachować pliki `.lyricsfile.yaml`.
   - **Enhanced LRC & synchronizacja słowna/sylabowa karaoke:**
     - Jeśli dostępne są znaczniki czasowe na poziomie słów (TTML, Lyricsfile YAML), agregator osadza format **Enhanced LRC (ELRC)** ze znacznikami `<mm:ss.xx>` dla każdego słowa wewnątrz tagów `LYRICS` / `USLT`.
     - Umożliwia to płynną animację karaoke słowo po słowie w **Feishin** (poprzez protokół OpenSubsonic Song Lyrics v2) oraz w **Symfonium**.

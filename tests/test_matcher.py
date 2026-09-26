@@ -697,3 +697,57 @@ async def test_credits_only_result_is_not_found_and_never_rewritten(tmp_path: Pa
     res = await LyricsMatcher(config, [MockProvider("p1", _lrc_result())]).process_track(track)
     assert res.status == MatchStatus.SUCCESS
     assert "Hello world" in (tmp_path / "song.lrc").read_text(encoding="utf-8")
+
+
+def _line_yaml_result() -> LyricsResult:
+    return LyricsResult(
+        content="version: '1.0'\nlines:\n  - text: Hello world\n    start_ms: 10000\n",
+        format=LyricsFormat.YAML,
+        sync_type=LyricsSyncType.LINE_SYNC,
+        provider_name="p1",
+        duration=200.0,
+        title="Song",
+        artist="Artist",
+    )
+
+
+@pytest.mark.asyncio
+async def test_lyricsfile_yaml_is_saved_in_converted_format(tmp_path: Path):
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, cache={"enabled": False}), [MockProvider("p1", _line_yaml_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert res.format == LyricsFormat.LRC
+    assert (tmp_path / "song.lrc").read_text(encoding="utf-8") == "[00:10.00]Hello world\n"
+    assert not (tmp_path / "song.lyricsfile.yaml").exists()
+
+
+@pytest.mark.asyncio
+async def test_converted_line_yaml_does_not_rewrite_existing_lrc(tmp_path: Path):
+    """Line-synced YAML ranks above LRC; converted to LRC it must not replace an equal LRC every scan."""
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    existing = tmp_path / "song.lrc"
+    existing.write_text("[00:10.00]My own edited line\n", encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, cache={"enabled": False}), [MockProvider("p1", _line_yaml_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SKIPPED
+    assert existing.read_text(encoding="utf-8") == "[00:10.00]My own edited line\n"
+
+
+@pytest.mark.asyncio
+async def test_keep_lyricsfile_yaml_option(tmp_path: Path):
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    config = AppConfig(music_dir=tmp_path, keep_lyricsfile_yaml=True, cache={"enabled": False})
+    matcher = LyricsMatcher(config, [MockProvider("p1", _line_yaml_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert (tmp_path / "song.lyricsfile.yaml").exists()
