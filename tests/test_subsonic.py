@@ -2,10 +2,16 @@
 
 import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
+import httpx
 import pytest
 
 from src.models import SubsonicTrack
 from src.subsonic import SubsonicClient
+
+
+def _no_native_api(client):
+    """Make the Navidrome native API unavailable so the Subsonic fallbacks are exercised."""
+    return patch.object(client, "_get_all_tracks_native", side_effect=httpx.ConnectError("no native API"))
 
 
 def test_subsonic_client_url_cleanup():
@@ -110,7 +116,7 @@ async def test_subsonic_get_all_tracks_search3():
         },
     ]
 
-    with patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
+    with _no_native_api(client), patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = {
             "status": "ok",
             "searchResult3": {
@@ -163,7 +169,7 @@ async def test_subsonic_get_all_tracks_fallback_to_albums():
             }
         return {"status": "ok"}
 
-    with patch.object(client, "_get", side_effect=fake_get):
+    with _no_native_api(client), patch.object(client, "_get", side_effect=fake_get):
         tracks = await client.get_all_tracks(batch_size=500)
         assert len(tracks) == 1
         assert tracks[0].id == "song-fallback"
@@ -209,7 +215,7 @@ async def test_subsonic_get_all_tracks_fallback_multiple_albums_concurrent():
             }
         return {"status": "ok"}
 
-    with patch.object(client, "_get", side_effect=fake_get):
+    with _no_native_api(client), patch.object(client, "_get", side_effect=fake_get):
         tracks = await client.get_all_tracks(batch_size=500)
         assert len(tracks) == 3
         ids = [t.id for t in tracks]
@@ -341,7 +347,116 @@ async def test_get_all_tracks_fallback_does_not_duplicate_partial_results():
             return {"album": {"song": [song(1), song(2), song(3)]}}
         raise AssertionError(endpoint)
 
-    with patch.object(client, "_get", side_effect=fake_get):
+    with _no_native_api(client), patch.object(client, "_get", side_effect=fake_get):
         tracks = await client.get_all_tracks(batch_size=2)
     assert [t.id for t in tracks] == ["1", "2", "3"]
+    await client.close()
+
+
+def _native_song(i, **extra):
+    return {
+        "id": f"n{i}",
+        "title": f"Song {i}",
+        "artist": "Artist",
+        "album": "Album",
+        "duration": 123.4,
+        "path": f"MUZYKA/Artist/Album/{i:02d}. Song {i}.flac",
+        "suffix": "FLAC",
+        "trackNumber": i,
+        "discNumber": 1,
+        "year": 2020,
+        "libraryPath": "/music",
+        "missing": False,
+        **extra,
+    }
+
+
+def _native_transport(songs, requests):
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/auth/login":
+            return httpx.Response(200, json={"token": "jwt-token"})
+        if request.url.path == "/api/song":
+            assert request.headers["x-nd-authorization"] == "Bearer jwt-token"
+            start, end = int(request.url.params["_start"]), int(request.url.params["_end"])
+            return httpx.Response(200, json=songs[start:end], headers={"X-Total-Count": str(len(songs))})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_get_all_tracks_native_api_single_request():
+    client = SubsonicClient("http://mock:4533", "user", "pass")
+    requests = []
+    songs = [_native_song(1), _native_song(2, missing=True), _native_song(3)]
+    client._client = httpx.AsyncClient(transport=_native_transport(songs, requests))
+
+    with patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
+        tracks = await client.get_all_tracks()
+        mock_get.assert_not_called()
+
+    # login + a single /api/song request for the whole library; missing files are dropped
+    assert [r.url.path for r in requests] == ["/auth/login", "/api/song"]
+    assert [t.id for t in tracks] == ["n1", "n3"]
+    t = tracks[0]
+    assert t.path == "MUZYKA/Artist/Album/01. Song 1.flac"
+    assert t.suffix == "flac"
+    assert (t.title, t.artist, t.album, t.duration) == ("Song 1", "Artist", "Album", 123.4)
+    assert (t.track_number, t.disc_number, t.year) == (1, 1, 2020)
+    assert t.lyrics_present is False
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_all_tracks_native_api_paginates_by_total_count():
+    client = SubsonicClient("http://mock:4533", "user", "pass")
+    requests = []
+    songs = [_native_song(i) for i in range(1, 6)]
+    client._client = httpx.AsyncClient(transport=_native_transport(songs, requests))
+
+    tracks = await client.get_all_tracks(batch_size=2)
+
+    assert [t.id for t in tracks] == ["n1", "n2", "n3", "n4", "n5"]
+    # 3 pages (2+2+1), no extra empty request once X-Total-Count is reached
+    assert sum(r.url.path == "/api/song" for r in requests) == 3
+    await client.close()
+
+
+def test_get_all_tracks_native_strips_absolute_library_path():
+    client = SubsonicClient("http://mock:4533", "user", "pass")
+    track = client._parse_native_song(_native_song(1, path="/music/MUZYKA/Artist/Album/01. Song 1.flac"))
+    assert track.path == "MUZYKA/Artist/Album/01. Song 1.flac"
+
+
+@pytest.mark.asyncio
+async def test_get_all_tracks_falls_back_to_search3_when_native_login_fails():
+    client = SubsonicClient("http://mock:4533", "user", "wrong")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(401, json={"error": "Invalid username or password"}))
+    )
+
+    with patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = {"searchResult3": {"song": [{"id": "s1", "title": "T", "artist": "A", "path": "A/T.mp3"}]}}
+        tracks = await client.get_all_tracks()
+
+    assert [t.id for t in tracks] == ["s1"]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_search3_keeps_paging_when_server_caps_song_count():
+    """A server returning fewer songs than requested per page must not truncate the library."""
+    client = SubsonicClient("http://mock:4533", "u", "p")
+    all_songs = [{"id": str(i), "title": f"T{i}", "artist": "A", "path": f"A/{i}.mp3"} for i in range(5)]
+    cap = 2
+
+    async def fake_get(endpoint, extra_params=None):
+        assert endpoint == "search3.view"
+        off = extra_params["songOffset"]
+        return {"searchResult3": {"song": all_songs[off:off + min(cap, extra_params["songCount"])]}}
+
+    with _no_native_api(client), patch.object(client, "_get", side_effect=fake_get):
+        tracks = await client.get_all_tracks(batch_size=100)
+    assert [t.id for t in tracks] == ["0", "1", "2", "3", "4"]
     await client.close()

@@ -4,8 +4,7 @@ import asyncio
 import hashlib
 import logging
 import secrets
-from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -113,13 +112,29 @@ class SubsonicClient:
         resp = await self._get("getScanStatus.view")
         return resp.get("scanStatus", {})
 
-    async def get_all_tracks(self, batch_size: int = 500) -> List[SubsonicTrack]:
-        """Fetch all music tracks from the Navidrome library using Subsonic search or album pagination."""
-        tracks: List[SubsonicTrack] = []
-        logger.info(f"Fetching track catalog from Navidrome via Subsonic API: {self.base_url}")
+    async def get_all_tracks(self, batch_size: int = 10000) -> List[SubsonicTrack]:
+        """Fetch all music tracks from the library.
 
-        # Method 1: search3.view with empty query (Navidrome natively supports this for pagination)
+        Tries the Navidrome native API first (one request for the whole library, real file
+        paths), then Subsonic search3 and finally the album listing for other servers.
+        """
+        logger.info(f"Fetching track catalog from Navidrome: {self.base_url}")
+
+        # Method 1: Navidrome native REST API. Unlike the Subsonic API, which by default
+        # reports made-up "Artist/Album/NN - Title.ext" paths, it returns the real paths.
         try:
+            tracks = await self._get_all_tracks_native(batch_size)
+            if tracks:
+                logger.info(f"Retrieved {len(tracks)} tracks via Navidrome native API")
+                return tracks
+        except Exception as e:
+            logger.debug(f"Navidrome native API unavailable, falling back to Subsonic search3: {e}")
+
+        # Method 2: search3.view with empty query (Navidrome natively supports this for pagination).
+        # Pages are requested until an empty one: some servers cap songCount below batch_size.
+        tracks = []
+        try:
+            seen: Set[str] = set()
             offset = 0
             while True:
                 resp = await self._get(
@@ -128,28 +143,34 @@ class SubsonicClient:
                         "query": "",
                         "songCount": batch_size,
                         "songOffset": offset,
+                        "artistCount": 0,
+                        "albumCount": 0,
                     },
                 )
                 search_res = resp.get("searchResult3", {})
                 songs = search_res.get("song", [])
-                if not songs:
+                new_songs = [s for s in songs if str(s.get("id", "")) not in seen]
+                if not new_songs:
+                    # Empty page, or a server ignoring songOffset and repeating itself
                     break
 
-                for s in songs:
+                for s in new_songs:
+                    seen.add(str(s.get("id", "")))
                     tracks.append(self._parse_song_to_track(s))
-
-                if len(songs) < batch_size:
-                    break
                 offset += len(songs)
 
             if tracks:
                 logger.info(f"Retrieved {len(tracks)} tracks via Subsonic search3.view")
+                logger.warning(
+                    "Subsonic API paths are virtual unless the server reports real paths "
+                    "(Navidrome: enable 'Report Real Path' for this client)"
+                )
                 return tracks
 
         except Exception as e:
             logger.debug(f"Subsonic search3 query='' returned exception, falling back to album listing: {e}")
 
-        # Method 2: Album listing fallback (getAlbumList2.view -> getAlbum.view).
+        # Method 3: Album listing fallback (getAlbumList2.view -> getAlbum.view).
         # search3 may have failed half-way through pagination: start from scratch so
         # the partial results are not duplicated by the full album listing.
         tracks = []
@@ -196,6 +217,82 @@ class SubsonicClient:
         except Exception as e:
             logger.error(f"Failed to retrieve tracks from Subsonic server: {e}")
             raise
+
+    async def _native_login(self) -> str:
+        """Log in to the Navidrome native API and return its JWT."""
+        client = self._get_client()
+        resp = await client.post(
+            f"{self.base_url}/auth/login",
+            json={"username": self.username, "password": self.password},
+        )
+        resp.raise_for_status()
+        token = resp.json().get("token")
+        if not token:
+            raise RuntimeError("Navidrome login response contained no token")
+        return token
+
+    async def _get_all_tracks_native(self, batch_size: int) -> List[SubsonicTrack]:
+        """Fetch all songs through the Navidrome native API (``/api/song``)."""
+        token = await self._native_login()
+        client = self._get_client()
+        headers = {"x-nd-authorization": f"Bearer {token}"}
+
+        tracks: List[SubsonicTrack] = []
+        library_paths: Set[str] = set()
+        start = 0
+        while True:
+            resp = await client.get(
+                f"{self.base_url}/api/song",
+                params={"_start": start, "_end": start + batch_size, "_sort": "id", "_order": "ASC"},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            songs = resp.json()
+            if not isinstance(songs, list):
+                raise RuntimeError(f"Unexpected /api/song response: {type(songs).__name__}")
+
+            for s in songs:
+                if s.get("missing"):
+                    continue
+                if s.get("libraryPath"):
+                    library_paths.add(str(s["libraryPath"]))
+                tracks.append(self._parse_native_song(s))
+
+            start += len(songs)
+            total = resp.headers.get("x-total-count")
+            if not songs or (start >= int(total) if total else len(songs) < batch_size):
+                break
+
+        if len(library_paths) > 1:
+            logger.warning(
+                f"Navidrome has {len(library_paths)} libraries ({', '.join(sorted(library_paths))}); "
+                "track paths are resolved against music_dir only"
+            )
+        return tracks
+
+    def _parse_native_song(self, s: Dict[str, Any]) -> SubsonicTrack:
+        """Parse a Navidrome native API song object into a SubsonicTrack.
+
+        ``lyrics_present`` is left unset: Navidrome only knows embedded lyrics from its last
+        scan, so the per-file checks in the matcher stay the source of truth.
+        """
+        path = str(s.get("path") or "")
+        library_path = str(s.get("libraryPath") or "").rstrip("/")
+        # Paths are relative to the library root; strip it should a server report them absolute
+        if library_path and path.startswith(library_path + "/"):
+            path = path[len(library_path) + 1:]
+        return SubsonicTrack(
+            id=str(s.get("id", "")),
+            title=str(s.get("title", "")),
+            artist=str(s.get("artist", "")),
+            album=s.get("album"),
+            duration=float(s.get("duration") or 0.0),
+            path=path,
+            suffix=str(s.get("suffix") or "mp3").lower(),
+            year=s.get("year") or None,
+            track_number=s.get("trackNumber") or None,
+            disc_number=s.get("discNumber") or None,
+        )
 
     def _parse_song_to_track(self, s: Dict[str, Any]) -> SubsonicTrack:
         """Parse raw Subsonic song JSON object into typed SubsonicTrack model."""
