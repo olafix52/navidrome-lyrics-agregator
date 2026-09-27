@@ -15,7 +15,7 @@ from src.logger import console
 from src.matcher import LyricsMatcher
 from src.models import MatchStatus, ProcessResult, TrackMetadata
 from src.normalizer import clean_artist, clean_title
-from src.storage import should_skip_track
+from src.storage import GLOBAL_SIDECAR_RANKS, SIDECAR_RANK_VERSION, should_skip_track
 from src.subsonic import SubsonicClient
 from src.tag_reader import fast_discover_audio_files, is_supported_audio_file, iter_discover_audio_files, read_track_metadata
 
@@ -47,7 +47,29 @@ class LibraryScanner:
         cfg = self.config
         return self.matcher.cache is not None and not (cfg.overwrite or cfg.ignore_cache)
 
+    async def load_sidecar_ranks(self) -> None:
+        """Load remembered sidecar ranks once per process and cache DB (see ``SidecarRankCache``)."""
+        cache = self.matcher.cache
+        if cache is None or GLOBAL_SIDECAR_RANKS.loaded_from == str(cache.db_path):
+            return
+        try:
+            GLOBAL_SIDECAR_RANKS.load(await cache.load_sidecar_ranks(SIDECAR_RANK_VERSION))
+            GLOBAL_SIDECAR_RANKS.loaded_from = str(cache.db_path)
+        except Exception as e:
+            logger.warning(f"Could not load sidecar ranks, sidecars will be re-read: {e}")
+
+    async def flush_sidecar_ranks(self) -> None:
+        cache = self.matcher.cache
+        if cache is None:
+            return
+        rows = GLOBAL_SIDECAR_RANKS.take_dirty()
+        try:
+            await cache.save_sidecar_ranks(rows, SIDECAR_RANK_VERSION)
+        except Exception as e:
+            logger.warning(f"Could not save sidecar ranks: {e}")
+
     async def _load_file_states(self) -> None:
+        await self.load_sidecar_ranks()
         self._file_states = {}
         self._pending_states = []
         if not self._file_states_enabled():
@@ -59,6 +81,7 @@ class LibraryScanner:
             logger.warning(f"Could not load file states, scanning everything: {e}")
 
     async def _flush_file_states(self) -> None:
+        await self.flush_sidecar_ranks()
         rows, self._pending_states = self._pending_states, []
         if not rows or self.matcher.cache is None:
             return

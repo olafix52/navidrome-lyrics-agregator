@@ -320,3 +320,53 @@ def test_save_sidecar_removes_superseded_but_keeps_better_synced(tmp_path: Path)
     save_lyrics_sidecar(audio_file, lrc, replace_existing=True)
     assert not ttml.exists()
     assert (tmp_path / "song.lrc").is_file()
+
+
+def test_sidecar_rank_is_read_once_until_the_file_changes(tmp_path: Path, monkeypatch):
+    from src.storage import get_sidecar_rank
+
+    ttml = tmp_path / "song.ttml"
+    ttml.write_text('<tt><body><p begin="00:01.000" end="00:02.000">Line</p></body></tt>', encoding="utf-8")
+
+    reads = []
+    orig_read = Path.read_text
+
+    def counting_read(self, *args, **kwargs):
+        reads.append(self)
+        return orig_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read)
+
+    assert get_sidecar_rank(ttml, LyricsFormat.TTML)[0] == 2
+    assert get_sidecar_rank(ttml, LyricsFormat.TTML)[0] == 2
+    assert len(reads) == 1
+
+    # A changed file (new size/mtime) is read again
+    monkeypatch.setattr(Path, "read_text", orig_read)
+    ttml.write_text(
+        '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Word</span></p></body></tt>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "read_text", counting_read)
+    assert get_sidecar_rank(ttml, LyricsFormat.TTML)[0] == 3
+    assert len(reads) == 2
+
+
+def test_saved_sidecar_rank_is_known_without_reading(tmp_path: Path, monkeypatch):
+    from src.storage import get_sidecar_rank
+
+    audio_file = tmp_path / "song.flac"
+    audio_file.write_bytes(b"dummy audio")
+    lrc = LyricsResult(
+        content="[00:01.00]Line",
+        format=LyricsFormat.LRC,
+        sync_type=LyricsSyncType.LINE_SYNC,
+        provider_name="p1",
+    )
+    saved = save_lyrics_sidecar(audio_file, lrc)
+
+    def no_read(self, *args, **kwargs):
+        raise AssertionError("a freshly saved sidecar must not be read back")
+
+    monkeypatch.setattr(Path, "read_text", no_read)
+    assert get_sidecar_rank(saved, LyricsFormat.LRC)[0] == 2

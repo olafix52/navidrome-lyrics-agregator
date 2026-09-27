@@ -217,3 +217,16 @@ async def test_spotify_id_invalid_id_ignored(temp_cache: LyricsCache):
     set_cached_spotify_id("Artist", "Song", "too_short", db_path=temp_cache.db_path)
     assert get_cached_spotify_id("Artist", "Song", db_path=temp_cache.db_path) is None
 
+
+
+@pytest.mark.asyncio
+async def test_sidecar_ranks_roundtrip(tmp_path: Path):
+    from src.cache import LyricsCache
+
+    cache = LyricsCache(db_path=tmp_path / "cache.db")
+    await cache.save_sidecar_ranks([("/music/a.ttml", 111, 2048, 3, 40)], version=1)
+    assert await cache.load_sidecar_ranks(1) == [("/music/a.ttml", 111, 2048, 3, 40)]
+    # Ranks recorded by another detection version are ignored
+    assert await cache.load_sidecar_ranks(2) == []
+    await cache.save_sidecar_ranks([("/music/a.ttml", 222, 1024, 2, 40)], version=1)
+    assert await cache.load_sidecar_ranks(1) == [("/music/a.ttml", 222, 1024, 2, 40)]

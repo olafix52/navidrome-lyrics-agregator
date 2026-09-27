@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import threading
 import uuid
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from src.models import LyricsFormat, LyricsResult, LyricsSyncType, StorageMode, detect_sync_type
 from src.tag_writer import embed_lyrics_in_audio, has_embedded_lyrics
 
@@ -95,6 +95,59 @@ class FolderLyricsIndex:
 
 GLOBAL_FOLDER_INDEX = FolderLyricsIndex()
 
+# Bump when the sync detection changes: ranks remembered by an older version are dropped.
+SIDECAR_RANK_VERSION = 1
+
+# (path, mtime_ns, size, sync_rank, format_priority) - the row layout persisted in the cache DB
+SidecarRankRow = Tuple[str, int, int, int, int]
+
+
+class SidecarRankCache:
+    """Remembered quality ranks of sidecar files, valid while their mtime and size are unchanged.
+
+    Judging a sidecar's sync precision means reading it; on a network share that is the
+    slow part of a scan. The scanner loads the ranks from the cache DB before a scan and
+    writes new ones back after it, so an unchanged file is read only once.
+    """
+
+    def __init__(self) -> None:
+        self._entries: Dict[str, Tuple[int, int, int, int]] = {}
+        self._dirty: Dict[str, SidecarRankRow] = {}
+        self._lock = threading.Lock()
+        self.loaded_from: Optional[str] = None
+
+    def get(self, path: Path, mtime_ns: int, size: int) -> Optional[Tuple[int, int]]:
+        with self._lock:
+            entry = self._entries.get(str(path))
+        if entry is None or entry[0] != mtime_ns or entry[1] != size:
+            return None
+        return entry[2], entry[3]
+
+    def put(self, path: Path, mtime_ns: int, size: int, rank: Tuple[int, int]) -> None:
+        row: SidecarRankRow = (str(path), mtime_ns, size, rank[0], rank[1])
+        with self._lock:
+            self._entries[row[0]] = row[1:]
+            self._dirty[row[0]] = row
+
+    def load(self, rows: Iterable[SidecarRankRow]) -> None:
+        with self._lock:
+            for path, mtime_ns, size, sync_rank, fmt_priority in rows:
+                self._entries.setdefault(path, (mtime_ns, size, sync_rank, fmt_priority))
+
+    def take_dirty(self) -> List[SidecarRankRow]:
+        with self._lock:
+            rows, self._dirty = list(self._dirty.values()), {}
+        return rows
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._dirty.clear()
+            self.loaded_from = None
+
+
+GLOBAL_SIDECAR_RANKS = SidecarRankCache()
+
 
 def resolve_sidecar_dir(
     audio_path: Path,
@@ -174,11 +227,28 @@ def get_existing_lyrics_rank(
 
 
 def get_sidecar_rank(lyrics_path: Path, fmt: LyricsFormat) -> Optional[Tuple[int, int]]:
-    """Quality rank of one sidecar file judged by its content, or None if it is unreadable."""
+    """Quality rank of one sidecar file judged by its content, or None if it is unreadable.
+
+    Remembered per file (see ``SidecarRankCache``): an unchanged file is not read again.
+    """
+    try:
+        st = lyrics_path.stat()  # a metadata query: far cheaper than reading the file on a share
+    except OSError:
+        return None
+    stamp = (st.st_mtime_ns, st.st_size)
+    rank = GLOBAL_SIDECAR_RANKS.get(lyrics_path, *stamp)
+    if rank is not None:
+        return rank
     try:
         content = lyrics_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    rank = _content_rank(content, fmt)
+    GLOBAL_SIDECAR_RANKS.put(lyrics_path, *stamp, rank)
+    return rank
+
+
+def _content_rank(content: str, fmt: LyricsFormat) -> Tuple[int, int]:
     from src.web.parser import count_lyric_lines  # local import: parser depends on models only
 
     if count_lyric_lines(content, fmt) == 0:
@@ -300,10 +370,14 @@ def save_lyrics_sidecar(
     # Atomic write via temporary file (unique per writer: watcher and scanner can run concurrently)
     temp_path = target_path.parent / f".{target_path.name}.tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
+        content = lyrics.content.strip() + "\n"
         with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(lyrics.content.strip() + "\n")
+            f.write(content)
         temp_path.replace(target_path)
-        GLOBAL_FOLDER_INDEX.register_file(target_path, len(lyrics.content.encode("utf-8")))
+        st = target_path.stat()
+        GLOBAL_FOLDER_INDEX.register_file(target_path, st.st_size)
+        # The content is at hand: remember its rank so the new file is never read back
+        GLOBAL_SIDECAR_RANKS.put(target_path, st.st_mtime_ns, st.st_size, _content_rank(content, lyrics.format))
         logger.debug(f"Saved {lyrics.format.value.upper()} lyrics to {target_path}")
 
         # Remove the sidecars the new file supersedes, whatever their format: a stale file of a

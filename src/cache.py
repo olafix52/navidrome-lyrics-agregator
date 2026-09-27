@@ -371,6 +371,18 @@ class LyricsCache:
                 );
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_state_cache_key ON file_state(cache_key);")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sidecar_rank (
+                    path TEXT PRIMARY KEY,
+                    mtime_ns INTEGER NOT NULL,
+                    size INTEGER NOT NULL,
+                    sync_rank INTEGER NOT NULL,
+                    format_priority INTEGER NOT NULL,
+                    version INTEGER NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+            """)
         _SPOTIFY_TABLE_READY.add(str(self.db_path))
 
         self._initialized = True
@@ -651,3 +663,47 @@ class LyricsCache:
             return
         await self.initialize()
         await asyncio.to_thread(self._save_file_states_sync, batch)
+
+    # ------------------------------------------------------------------
+    # Sidecar quality ranks (sidecars are read only when they change)
+    # ------------------------------------------------------------------
+
+    def _load_sidecar_ranks_sync(self, version: int) -> List[Tuple[str, int, int, int, int]]:
+        self._init_db_sync()
+        return self._conn().execute(
+            "SELECT path, mtime_ns, size, sync_rank, format_priority FROM sidecar_rank WHERE version = ?",
+            (version,),
+        ).fetchall()
+
+    async def load_sidecar_ranks(self, version: int) -> List[Tuple[str, int, int, int, int]]:
+        """``(path, mtime_ns, size, sync_rank, format_priority)`` rows recorded by ``version``."""
+        await self.initialize()
+        return await asyncio.to_thread(self._load_sidecar_ranks_sync, version)
+
+    def _save_sidecar_ranks_sync(self, rows: List[Tuple[str, int, int, int, int]], version: int) -> None:
+        self._init_db_sync()
+        now = time.time()
+        conn = self._conn()
+        with conn:
+            conn.executemany(
+                """
+                INSERT INTO sidecar_rank (path, mtime_ns, size, sync_rank, format_priority, version, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    mtime_ns = excluded.mtime_ns,
+                    size = excluded.size,
+                    sync_rank = excluded.sync_rank,
+                    format_priority = excluded.format_priority,
+                    version = excluded.version,
+                    updated_at = excluded.updated_at;
+                """,
+                [(*row, version, now) for row in rows],
+            )
+
+    async def save_sidecar_ranks(self, rows: Iterable[Tuple[str, int, int, int, int]], version: int) -> None:
+        """Upsert ``(path, mtime_ns, size, sync_rank, format_priority)`` rows in one transaction."""
+        batch = list(rows)
+        if not batch:
+            return
+        await self.initialize()
+        await asyncio.to_thread(self._save_sidecar_ranks_sync, batch, version)

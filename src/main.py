@@ -337,6 +337,9 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
     try:
         all_audio = scanner.discover_audio_files(target_path)
         console.print(f"[bold cyan]Discovered {len(all_audio)} total tracks in:[/bold cyan] {target_path}")
+        # Candidates are picked by the sync precision of existing sidecars: use the remembered
+        # ranks so unchanged sidecars are not read again
+        await scanner.load_sidecar_ranks()
 
         candidates = []
         for audio_path in all_audio:
@@ -359,6 +362,7 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
 
         console.print(f"[bold green]Tracks targeted for upgrade/fetch:[/bold green] {len(candidates)} of {len(all_audio)}")
         if not candidates:
+            await scanner.flush_sidecar_ranks()
             console.print("[green]All tracks already have top quality lyrics! Nothing to upgrade.[/green]")
             return
 

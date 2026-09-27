@@ -312,3 +312,38 @@ def test_watch_command_applies_processing_flags():
     assert config.early_exit_on_line_sync is True
     assert config.word_sync_search_budget == 2
     assert config.allow_plain_lyrics is True
+
+
+@pytest.mark.asyncio
+async def test_scanner_remembers_sidecar_ranks_across_runs(tmp_path, monkeypatch):
+    """A second scan (new process) does not read unchanged sidecars again."""
+    from unittest.mock import AsyncMock
+    from src.cache import LyricsCache
+    from src.config import AppConfig
+    from src.scanner import LibraryScanner
+    from src.storage import GLOBAL_SIDECAR_RANKS
+
+    audio = tmp_path / "song.flac"
+    audio.write_bytes(b"dummy")
+    ttml = tmp_path / "song.ttml"
+    ttml.write_text(
+        '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Hi</span></p></body></tt>',
+        encoding="utf-8",
+    )
+    config = AppConfig(music_dir=tmp_path)
+
+    matcher = AsyncMock()
+    matcher.cache = LyricsCache(db_path=tmp_path / "cache.db")
+    scanner = LibraryScanner(config, matcher)
+    await scanner.process_files([audio], show_progress=False)
+    matcher.process_track.assert_not_called()
+
+    GLOBAL_SIDECAR_RANKS.clear()  # simulate a new process
+
+    def no_read(self, *args, **kwargs):
+        raise AssertionError(f"unchanged sidecar read again: {self}")
+
+    monkeypatch.setattr(type(ttml), "read_text", no_read)
+    scanner = LibraryScanner(config, matcher)
+    await scanner.process_files([audio], show_progress=False)
+    matcher.process_track.assert_not_called()

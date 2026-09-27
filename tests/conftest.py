@@ -4,12 +4,14 @@ from pathlib import Path
 import pytest
 from src.config import AppConfig
 from src.cache import clear_spotify_id_mem_cache, close_cache_connections, set_active_cache_db_path
+from src.storage import GLOBAL_SIDECAR_RANKS
 
 
 @pytest.fixture(autouse=True)
 def isolate_test_cache(tmp_path, monkeypatch):
     """Ensure all tests use an isolated temporary SQLite database for lyrics cache."""
     clear_spotify_id_mem_cache()
+    GLOBAL_SIDECAR_RANKS.clear()
     test_db = tmp_path / "test_lyrics_cache.db"
     set_active_cache_db_path(test_db)
 
@@ -23,5 +25,6 @@ def isolate_test_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(AppConfig, "__init__", patched_init)
     yield
     clear_spotify_id_mem_cache()
+    GLOBAL_SIDECAR_RANKS.clear()
     close_cache_connections()  # pooled SQLite connections must not outlive the test's tmp dir
 
