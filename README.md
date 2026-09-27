@@ -87,7 +87,7 @@
   - `cache` – Inspect cache statistics (`--stats`), prune expired entries (`--prune`), or clear the negative cache (`--clear`).
   - `test-track` – Rapid CLI provider query testing for a single artist and title without writing files.
   - `audit` (or `stats`) – Offline library audit reporting coverage (word-sync, line-sync, unsynced, missing) with JSON/CSV export.
-  - `upgrade` – Targeted scan querying providers only for tracks lacking word-sync lyrics, automatically skipping `.ttml`.
+  - `upgrade` – Targeted scan querying providers only for tracks lacking word-sync lyrics, skipping tracks that already have word-synced TTML/YAML (a line-synced TTML is upgraded).
   - `prune` – Safe housekeeping tool detecting and removing orphaned lyrics or obsolete lower-quality duplicates.
   - `web` (or `dashboard`) – Minimalist Web UI dashboard with live karaoke music player (ToxiPlays TTML renderer), provider toggles, and cache management.
   - `trigger-scan` – Trigger a library rescan on Navidrome server on demand.

@@ -87,7 +87,7 @@
   - `cache` – Podgląd statystyk cache'u (`--stats`), czyszczenie przestarzałych wpisów (`--prune`) lub reset bazy negatywnej (`--clear`).
   - `test-track` – Błyskawiczne sprawdzenie wyników u wszystkich dostawców dla jednego utworu z poziomu konsoli.
   - `audit` (lub `stats`) – Audyt offline raportujący stan biblioteki z eksportem do JSON/CSV.
-  - `upgrade` – Pobieranie tekstów word-sync tylko dla utworów, które ich nie posiadają (pomija `.ttml`).
+  - `upgrade` – Pobieranie tekstów word-sync tylko dla utworów, które ich nie posiadają (pomija utwory, które mają już TTML/YAML z synchronizacją słowną; TTML z synchronizacją liniową jest ulepszany).
   - `prune` – Usuwanie osieroconych plików tekstów i przestarzałych duplikatów o niższej jakości.
   - `web` (lub `dashboard`) – Minimalistyczny panel Web UI z odtwarzaczem karaoke (renderer ToxiPlays TTML), przełącznikami dostawców i zarządzaniem cache.
   - `trigger-scan` – Wywołanie skanowania biblioteki na serwerze Navidrome.

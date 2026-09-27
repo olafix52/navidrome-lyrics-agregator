@@ -222,15 +222,12 @@ def should_skip_track(
 
     # In 'both' mode, also check embedded tags if sidecar already exists
     if mode == StorageMode.BOTH.value:
-        has_tags = _has_tags()
-        if existing and has_tags:
+        if existing and _has_tags():
             existing_path, existing_format = existing
-            if existing_format == LyricsFormat.TTML:
-                return True, f"Both TTML sidecar and embedded lyrics already exist ({audio_path.name})"
             if not upgrade_quality:
                 return True, f"Both {existing_format.value.upper()} sidecar and embedded lyrics already exist"
-            if existing_format == LyricsFormat.YAML:
-                return True, f"Both YAML sidecar and embedded lyrics already exist"
+            if is_word_synced_sidecar(existing_path, existing_format):
+                return True, f"Both word-synced {existing_format.value.upper()} sidecar and embedded lyrics already exist ({audio_path.name})"
         # If either is missing, allow searching so we can populate both
         return False, None
 
@@ -240,20 +237,29 @@ def should_skip_track(
 
     existing_path, existing_format = existing
 
-    # If we already have TTML (top quality), we always skip unless overwrite is True
-    if existing_format == LyricsFormat.TTML:
-        return True, f"TTML file already exists ({existing_path.name})"
-
     # If upgrade_quality is disabled, skip any existing file
     if not upgrade_quality:
         return True, f"{existing_format.value.upper()} file already exists ({existing_path.name})"
 
-    # If existing format is YAML, only skip if we don't want to attempt TTML upgrade
-    if existing_format == LyricsFormat.YAML:
-        return True, f"Lyricsfile YAML already exists ({existing_path.name})"
+    # Word sync is the top quality. Judged by content, not by extension: a line-synced
+    # TTML (itunes:timing="Line") can still be upgraded to word sync.
+    if is_word_synced_sidecar(existing_path, existing_format):
+        return True, f"Word-synced {existing_format.value.upper()} file already exists ({existing_path.name})"
 
-    # Existing is LRC or TXT, allowed to try upgrading to TTML/YAML
     return False, None
+
+
+def is_word_synced_sidecar(lyrics_path: Path, fmt: LyricsFormat) -> bool:
+    """Whether a sidecar already holds top-quality lyrics: a word-synced TTML or YAML.
+
+    Judged by content, not by extension. A word-synced (Enhanced) LRC still qualifies for
+    an upgrade to TTML, as before.
+    """
+    if fmt not in (LyricsFormat.TTML, LyricsFormat.YAML):
+        return False
+    rank = get_sidecar_rank(lyrics_path, fmt)
+    # An unreadable file is left alone rather than re-fetched on every scan
+    return rank is None or rank[0] >= _SYNC_RANK[LyricsSyncType.WORD_SYNC]
 
 
 def save_lyrics_sidecar(

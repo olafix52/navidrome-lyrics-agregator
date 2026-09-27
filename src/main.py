@@ -14,11 +14,11 @@ from src.audit import LibraryAuditor, LibraryPruner
 from src.config import AppConfig, ConfigFileError, load_config, validate_scan_interval
 from src.logger import console, setup_logger
 from src.matcher import LyricsMatcher
-from src.models import LyricsFormat, TrackMetadata
+from src.models import TrackMetadata
 from src.normalizer import clean_artist, clean_title
 from src.providers import build_provider_cascade
 from src.scanner import LibraryScanner
-from src.storage import get_existing_lyrics_file
+from src.storage import get_existing_lyrics_file, is_word_synced_sidecar
 from src.watcher import DirectoryWatcher
 
 logger = logging.getLogger("nla.main")
@@ -344,9 +344,8 @@ async def run_upgrade_command(args: argparse.Namespace, config) -> None:
                 audio_path, output_dir=config.output_dir, music_dir=config.music_dir
             )
             if existing:
-                _, fmt = existing
-                if not args.force and fmt in (LyricsFormat.TTML, LyricsFormat.YAML):
-                    # Already top-tier word-sync lyrics, skip
+                if not args.force and is_word_synced_sidecar(*existing):
+                    # Already word-synced (judged by content: a line-synced TTML still qualifies)
                     continue
                 if args.only_missing:
                     # Track already has lyrics, skip because only_missing requested
@@ -759,7 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_p.add_argument("-d", "--music-dir", type=str, default=argparse.SUPPRESS, help="Root music directory (overrides config)")
     upgrade_p.add_argument("--only-lrc", action="store_true", help="Only upgrade tracks that already have line-sync/plain lyrics")
     upgrade_p.add_argument("--only-missing", action="store_true", help="Only download lyrics for tracks with no lyrics at all")
-    upgrade_p.add_argument("-f", "--force", action="store_true", help="Force re-fetching even if TTML already exists")
+    upgrade_p.add_argument("-f", "--force", action="store_true", help="Force re-fetching even if word-synced lyrics already exist")
     upgrade_p.add_argument("--dry-run", action="store_true", help="Simulate upgrade without writing files")
     upgrade_p.add_argument("--allow-plain", action="store_true", help="Allow fallback to plain lyrics")
     upgrade_p.add_argument("--concurrency", type=int, help="Number of concurrent download tasks")

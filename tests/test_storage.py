@@ -46,12 +46,34 @@ def test_should_skip_track(tmp_path: Path):
     skip, _ = should_skip_track(audio_file, overwrite=False, upgrade_quality=True)
     assert skip is False
 
-    # Existing TTML -> should skip
+    # Existing line-synced TTML -> may still be upgraded to word sync
     ttml_file = tmp_path / "track.ttml"
-    ttml_file.write_text("<tt>...</tt>", encoding="utf-8")
+    ttml_file.write_text('<tt><body><p begin="00:01.000" end="00:02.000">Hi</p></body></tt>', encoding="utf-8")
+    skip, _ = should_skip_track(audio_file, overwrite=False, upgrade_quality=True)
+    assert skip is False
+
+    # ...but not with upgrade_quality disabled
+    skip, _ = should_skip_track(audio_file, overwrite=False, upgrade_quality=False)
+    assert skip is True
+
+    # Existing word-synced TTML -> should skip
+    ttml_file.write_text('<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Hi</span></p></body></tt>', encoding="utf-8")
     skip, reason = should_skip_track(audio_file, overwrite=False, upgrade_quality=True)
     assert skip is True
     assert "TTML" in reason
+
+    # Word-synced Lyricsfile YAML -> should skip; line-synced one -> may be upgraded
+    ttml_file.unlink()
+    yaml_file = tmp_path / "track.lyricsfile.yaml"
+    yaml_file.write_text("lines:\n  - text: Hi\n    start_ms: 1000\n", encoding="utf-8")
+    skip, _ = should_skip_track(audio_file, overwrite=False, upgrade_quality=True)
+    assert skip is False
+    yaml_file.write_text(
+        "lines:\n  - text: Hi\n    start_ms: 1000\n    words:\n      - text: Hi\n        start_ms: 1000\n        end_ms: 1500\n",
+        encoding="utf-8",
+    )
+    skip, _ = should_skip_track(audio_file, overwrite=False, upgrade_quality=True)
+    assert skip is True
 
     # Overwrite=True -> should never skip
     skip, _ = should_skip_track(audio_file, overwrite=True, upgrade_quality=True)
@@ -180,7 +202,7 @@ def test_should_skip_track_storage_modes(tmp_path: Path):
 
     # Mode both -> with TTML sidecar -> should skip even with upgrade_quality=True
     ttml_file = tmp_path / "song_skip.ttml"
-    ttml_file.write_text("<tt>...</tt>")
+    ttml_file.write_text('<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Hi</span></p></body></tt>')
     skip, reason = should_skip_track(audio_file, storage_mode="both", upgrade_quality=True)
     assert skip is True
 
@@ -201,7 +223,7 @@ def test_storage_output_dir(tmp_path: Path):
 
     # Place lyrics in output_dir
     sidecar = lyrics_dir / "track.ttml"
-    sidecar.write_text("<tt>...</tt>")
+    sidecar.write_text('<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Hi</span></p></body></tt>')
 
     # Should find in output_dir
     found = get_existing_lyrics_file(audio_file, output_dir=lyrics_dir)

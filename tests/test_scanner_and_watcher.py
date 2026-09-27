@@ -253,7 +253,7 @@ async def test_scanner_streaming_scan_and_process(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_scanner_skips_before_reading_tags(tmp_path, monkeypatch):
-    """Tracks that already have TTML must be skipped without parsing the audio file."""
+    """Tracks that already have word-synced TTML must be skipped without parsing the audio file."""
     from unittest.mock import AsyncMock
     import src.scanner as scanner_mod
     from src.config import AppConfig
@@ -262,7 +262,10 @@ async def test_scanner_skips_before_reading_tags(tmp_path, monkeypatch):
 
     audio = tmp_path / "song.flac"
     audio.write_bytes(b"dummy")
-    (tmp_path / "song.ttml").write_text("<tt/>", encoding="utf-8")
+    (tmp_path / "song.ttml").write_text(
+        '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Hi</span></p></body></tt>',
+        encoding="utf-8",
+    )
 
     def _boom(_):
         raise AssertionError("metadata must not be read for skipped tracks")

@@ -644,6 +644,28 @@ async def test_overwrite_replaces_equally_synced_sidecar_of_other_format(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_line_synced_ttml_is_upgraded_to_word_sync(tmp_path: Path):
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    (tmp_path / "song.ttml").write_text(_LINE_TTML, encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    word = LyricsResult(
+        content=_WORD_TTML,
+        format=LyricsFormat.TTML,
+        sync_type=LyricsSyncType.WORD_SYNC,
+        provider_name="p1",
+        duration=200.0,
+        title="Song",
+        artist="Artist",
+    )
+    matcher = LyricsMatcher(AppConfig(music_dir=tmp_path, cache={"enabled": False}), [MockProvider("p1", word)])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert "<span" in (tmp_path / "song.ttml").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_dry_run_leaves_no_negative_cache_entries(tmp_path: Path):
     from src.cache import LyricsCache
 
