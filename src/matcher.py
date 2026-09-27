@@ -322,6 +322,26 @@ class LyricsMatcher:
             if not getattr(self.config, "keep_lyricsfile_yaml", False):
                 lyrics = convert_lyricsfile_result(lyrics)
 
+            # Overwrite re-fetches everything, but must not replace lyrics with less precisely
+            # synced ones (e.g. a word-synced TTML with an LRC when only line sync was found).
+            if self.config.overwrite and storage_mode in (StorageMode.SIDECAR.value, StorageMode.BOTH.value):
+                current_rank = await asyncio.to_thread(
+                    get_existing_lyrics_rank,
+                    track.file_path,
+                    output_dir=self.config.output_dir,
+                    music_dir=self.config.music_dir,
+                )
+                if current_rank is not None and lyrics_quality_rank(lyrics.sync_type, lyrics.format)[0] < current_rank[0]:
+                    logger.info(
+                        f"[NO OVERWRITE] {track.display_name()} - best result ({lyrics.format.value.upper()}, "
+                        f"{lyrics.sync_type.value} via {provider_name}) is less precisely synced than the existing sidecar"
+                    )
+                    return ProcessResult(
+                        file_path=track.file_path,
+                        status=MatchStatus.SKIPPED,
+                        error_message="Existing sidecar is more precisely synced than the best result",
+                    )
+
             save_mode = storage_mode
             if existing_rank is not None and lyrics_quality_rank(lyrics.sync_type, lyrics.format) <= existing_rank:
                 if not tags_missing:

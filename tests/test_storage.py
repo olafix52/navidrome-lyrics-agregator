@@ -270,3 +270,31 @@ def test_folder_lyrics_index_caching_and_invalidation(tmp_path: Path):
     assert "track1.lrc" in entries_reloaded
 
 
+
+
+def test_save_sidecar_removes_superseded_but_keeps_better_synced(tmp_path: Path):
+    audio_file = tmp_path / "song.flac"
+    audio_file.write_bytes(b"dummy audio")
+    ttml = tmp_path / "song.ttml"
+    lrc = LyricsResult(
+        content="[00:01.00]New line",
+        format=LyricsFormat.LRC,
+        sync_type=LyricsSyncType.LINE_SYNC,
+        provider_name="p1",
+    )
+
+    # A line-synced TTML is superseded by an equally synced LRC
+    ttml.write_text('<tt><body><p begin="00:01.000" end="00:02.000">Old</p></body></tt>', encoding="utf-8")
+    save_lyrics_sidecar(audio_file, lrc)
+    assert not ttml.exists()
+
+    # A word-synced TTML is kept...
+    word_ttml = '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Old</span></p></body></tt>'
+    ttml.write_text(word_ttml, encoding="utf-8")
+    save_lyrics_sidecar(audio_file, lrc)
+    assert ttml.read_text(encoding="utf-8") == word_ttml
+
+    # ...unless the user explicitly replaces it
+    save_lyrics_sidecar(audio_file, lrc, replace_existing=True)
+    assert not ttml.exists()
+    assert (tmp_path / "song.lrc").is_file()

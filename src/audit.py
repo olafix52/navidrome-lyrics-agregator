@@ -11,7 +11,7 @@ from rich.table import Table
 
 from src.logger import console
 from src.models import LyricsFormat, LyricsSyncType, detect_sync_type
-from src.storage import LYRICS_EXTENSIONS_PRIORITY, get_existing_lyrics_file
+from src.storage import LYRICS_EXTENSIONS_PRIORITY, get_existing_lyrics_file, get_sidecar_rank
 from src.tag_reader import SUPPORTED_AUDIO_EXTENSIONS, fast_discover_audio_files, is_supported_audio_file, read_track_metadata
 
 logger = logging.getLogger("nla.audit")
@@ -352,6 +352,10 @@ class LibraryPruner:
     def find_duplicate_sidecars(self, root_dir: Path) -> List[Tuple[Path, Path]]:
         """Find lower-quality duplicate sidecar files where a higher quality sidecar exists for the same track.
 
+        The kept file is the most precisely synced one judged by content, not by extension
+        (a line-synced .ttml is no better than an .lrc); among equals the newest file wins.
+        Tracks with an unreadable sidecar are left alone.
+
         Returns:
             List of (obsolete_file_to_delete, kept_higher_quality_file)
         """
@@ -368,10 +372,16 @@ class LibraryPruner:
                         sidecars.append((candidate, fmt))
 
             if len(sidecars) > 1:
-                # Highest priority is sidecars[0] because LYRICS_EXTENSIONS_PRIORITY is descending
-                kept_file, _ = sidecars[0]
-                for dup_file, _ in sidecars[1:]:
-                    if dup_file != kept_file:
+                ranked = []
+                for path, fmt in sidecars:
+                    rank = get_sidecar_rank(path, fmt)
+                    if rank is None:
+                        break
+                    ranked.append(((rank[0], path.stat().st_mtime), path))
+                else:
+                    ranked.sort(key=lambda item: item[0], reverse=True)
+                    kept_file = ranked[0][1]
+                    for _, dup_file in ranked[1:]:
                         duplicates.append((dup_file, kept_file))
 
         return duplicates

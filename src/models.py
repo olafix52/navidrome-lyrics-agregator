@@ -73,7 +73,8 @@ def detect_sync_type(content: str, fmt: LyricsFormat, hint: Optional[str] = None
             return LyricsSyncType.WORD_SYNC
         if hint and ("word" in hint.lower() or "syllable" in hint.lower()):
             return LyricsSyncType.WORD_SYNC
-        if "start_ms:" in text or "lines:" in text:
+        # Not "lines:": unsynced documents carry an empty "lines: []" next to "plain:"
+        if "start_ms:" in text:
             return LyricsSyncType.LINE_SYNC
         if hint and "line" in hint.lower():
             return LyricsSyncType.LINE_SYNC

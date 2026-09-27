@@ -130,7 +130,10 @@ def test_library_pruner_orphans_and_duplicates(tmp_path: Path):
     t1_audio = tmp_path / "Song1.mp3"
     t1_audio.write_bytes(b"audio")
     t1_ttml = tmp_path / "Song1.ttml"
-    t1_ttml.write_text("<tt>TTML</tt>", encoding="utf-8")
+    t1_ttml.write_text(
+        '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">TTML</span></p></body></tt>',
+        encoding="utf-8",
+    )
     t1_lrc = tmp_path / "Song1.lrc"
     t1_lrc.write_text("[00:01.00]Old LRC", encoding="utf-8")
 
@@ -233,7 +236,10 @@ async def test_run_upgrade_command_skips_ttml(tmp_path: Path):
     t1_audio = tmp_path / "AlreadyGood.mp3"
     t1_audio.write_bytes(b"audio")
     t1_ttml = tmp_path / "AlreadyGood.ttml"
-    t1_ttml.write_text("<tt>TTML</tt>", encoding="utf-8")
+    t1_ttml.write_text(
+        '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">TTML</span></p></body></tt>',
+        encoding="utf-8",
+    )
 
     class FakeArgs:
         path = str(tmp_path)
@@ -263,3 +269,38 @@ def test_prune_orphans_ignores_unrelated_txt_and_yaml(tmp_path: Path):
 
     orphans = {p.name for p in LibraryPruner().find_orphaned_sidecars(tmp_path)}
     assert orphans == {"Removed Track.lrc", "Removed Track.ttml", "Removed Track.lyricsfile.yaml"}
+
+
+def test_pruner_keeps_best_synced_then_newest_duplicate(tmp_path: Path):
+    """Duplicates are ranked by the sync precision of their content, then by age."""
+    import os
+
+    # Line-synced TTML (older) vs. line-synced LRC (newer): same precision, the newer LRC wins
+    (tmp_path / "A.mp3").write_bytes(b"audio")
+    a_ttml = tmp_path / "A.ttml"
+    a_ttml.write_text('<tt><body><p begin="00:01.000" end="00:02.000">Line</p></body></tt>', encoding="utf-8")
+    a_lrc = tmp_path / "A.lrc"
+    a_lrc.write_text("[00:01.00]Line", encoding="utf-8")
+    os.utime(a_ttml, (1000, 1000))
+
+    # Word-synced TTML (older) vs. line-synced LRC (newer): the better synced TTML wins
+    (tmp_path / "B.mp3").write_bytes(b"audio")
+    b_ttml = tmp_path / "B.ttml"
+    b_ttml.write_text(
+        '<tt><body><p begin="00:01.000"><span begin="00:01.000" end="00:02.000">Word</span></p></body></tt>',
+        encoding="utf-8",
+    )
+    b_lrc = tmp_path / "B.lrc"
+    b_lrc.write_text("[00:01.00]Word", encoding="utf-8")
+    os.utime(b_ttml, (1000, 1000))
+
+    # Unsynced Lyricsfile YAML (older, "lines: []") vs. TXT (newer): the newer TXT wins
+    (tmp_path / "C.mp3").write_bytes(b"audio")
+    c_yaml = tmp_path / "C.lyricsfile.yaml"
+    c_yaml.write_text("version: '1.0'\nlines: []\nplain: |-\n  Hello there\n", encoding="utf-8")
+    c_txt = tmp_path / "C.txt"
+    c_txt.write_text("Hello there", encoding="utf-8")
+    os.utime(c_yaml, (1000, 1000))
+
+    duplicates = set(LibraryPruner().find_duplicate_sidecars(tmp_path))
+    assert duplicates == {(a_ttml, a_lrc), (b_lrc, b_ttml), (c_yaml, c_txt)}

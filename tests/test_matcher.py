@@ -601,6 +601,48 @@ async def test_overwrite_still_rewrites_equal_quality(tmp_path: Path):
     assert "Hello world" in (tmp_path / "song.lrc").read_text(encoding="utf-8")
 
 
+_WORD_TTML = (
+    '<tt xmlns="http://www.w3.org/ns/ttml"><body><p begin="00:10.000" end="00:12.000">'
+    '<span begin="00:10.000" end="00:11.000">Hello</span></p></body></tt>'
+)
+_LINE_TTML = (
+    '<tt xmlns="http://www.w3.org/ns/ttml"><body>'
+    '<p begin="00:10.000" end="00:12.000">Old line</p></body></tt>'
+)
+
+
+@pytest.mark.asyncio
+async def test_overwrite_does_not_replace_better_synced_lyrics(tmp_path: Path):
+    """--overwrite must not put a line-synced LRC next to (or instead of) a word-synced TTML."""
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    (tmp_path / "song.ttml").write_text(_WORD_TTML, encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    config = AppConfig(music_dir=tmp_path, overwrite=True, cache={"enabled": False})
+    matcher = LyricsMatcher(config, [MockProvider("p1", _lrc_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SKIPPED
+    assert not (tmp_path / "song.lrc").exists()
+    assert (tmp_path / "song.ttml").read_text(encoding="utf-8") == _WORD_TTML
+
+
+@pytest.mark.asyncio
+async def test_overwrite_replaces_equally_synced_sidecar_of_other_format(tmp_path: Path):
+    """A new LRC supersedes a line-synced TTML instead of being shadowed by it."""
+    audio_path = tmp_path / "song.mp3"
+    audio_path.write_bytes(b"dummy")
+    (tmp_path / "song.ttml").write_text(_LINE_TTML, encoding="utf-8")
+    track = TrackMetadata(file_path=audio_path, title="Song", artist="Artist", duration=200.0)
+
+    config = AppConfig(music_dir=tmp_path, overwrite=True, cache={"enabled": False})
+    matcher = LyricsMatcher(config, [MockProvider("p1", _lrc_result())])
+    res = await matcher.process_track(track)
+    assert res.status == MatchStatus.SUCCESS
+    assert "Hello world" in (tmp_path / "song.lrc").read_text(encoding="utf-8")
+    assert not (tmp_path / "song.ttml").exists()
+
+
 @pytest.mark.asyncio
 async def test_dry_run_leaves_no_negative_cache_entries(tmp_path: Path):
     from src.cache import LyricsCache

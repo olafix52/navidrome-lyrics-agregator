@@ -506,6 +506,7 @@ def create_app(
             dry_run=False,
             remove_lower_quality=True,
             enhanced_lrc=cfg.embed_word_sync,
+            replace_existing=True,  # the user picked these lyrics: never leave a sidecar shadowing them
         )
         library_index.mark_dir_dirty(audio_path.parent)
 

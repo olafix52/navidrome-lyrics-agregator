@@ -95,6 +95,8 @@ def test_detect_sync_type():
     # YAML without words (e.g. Sentino from LRCLIB)
     yaml_line = "version: '1.0'\nlines:\n  - text: Hello\n    start_ms: 1000\n"
     assert detect_sync_type(yaml_line, LyricsFormat.YAML) == LyricsSyncType.LINE_SYNC
+    yaml_plain = "version: '1.0'\nlines: []\nplain: |-\n  Hello\n"
+    assert detect_sync_type(yaml_plain, LyricsFormat.YAML) == LyricsSyncType.UNSYNCED
 
     # Standard LRC
     lrc_line = "[00:12.50] Hello world"

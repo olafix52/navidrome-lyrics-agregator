@@ -170,7 +170,11 @@ def get_existing_lyrics_rank(
     existing = get_existing_lyrics_file(audio_path, output_dir=output_dir, music_dir=music_dir)
     if not existing:
         return None
-    lyrics_path, fmt = existing
+    return get_sidecar_rank(*existing)
+
+
+def get_sidecar_rank(lyrics_path: Path, fmt: LyricsFormat) -> Optional[Tuple[int, int]]:
+    """Quality rank of one sidecar file judged by its content, or None if it is unreadable."""
     try:
         content = lyrics_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -259,6 +263,7 @@ def save_lyrics_sidecar(
     remove_lower_quality: bool = True,
     output_dir: Optional[Path] = None,
     music_dir: Optional[Path] = None,
+    replace_existing: bool = False,
 ) -> Path:
     """Atomically save lyrics content as a companion sidecar file.
     
@@ -266,9 +271,12 @@ def save_lyrics_sidecar(
         audio_path: Path to the audio file
         lyrics: LyricsResult object containing content and format
         dry_run: If True, simulate without writing to disk
-        remove_lower_quality: If True and we saved TTML/YAML, remove obsolete .lrc/.txt files
+        remove_lower_quality: If True, remove the track's other sidecars that are not more
+            precisely synced than the saved lyrics (the new file supersedes them)
         output_dir: Optional custom destination root (library structure is mirrored below it)
         music_dir: Library root used to mirror the folder structure below ``output_dir``
+        replace_existing: With ``remove_lower_quality``, remove the other sidecars even when
+            they are more precisely synced (an explicit user choice, e.g. a Web UI save)
         
     Returns:
         Target file path
@@ -292,19 +300,25 @@ def save_lyrics_sidecar(
         GLOBAL_FOLDER_INDEX.register_file(target_path, len(lyrics.content.encode("utf-8")))
         logger.debug(f"Saved {lyrics.format.value.upper()} lyrics to {target_path}")
 
-        # Clean up lower quality sidecars if upgraded to higher quality format
-        if remove_lower_quality and lyrics.format in (LyricsFormat.TTML, LyricsFormat.YAML):
+        # Remove the sidecars the new file supersedes, whatever their format: a stale file of a
+        # higher-priority format (e.g. a line-synced .ttml next to a new .lrc) would shadow it.
+        if remove_lower_quality:
+            new_sync = _SYNC_RANK.get(lyrics.sync_type, 0)
             for fmt, exts in LYRICS_EXTENSIONS_PRIORITY:
-                if fmt.priority < lyrics.format.priority:
-                    for ext in exts:
-                        old_candidate = dest_dir / f"{audio_path.stem}{ext}"
-                        if old_candidate.is_file() and old_candidate != target_path:
-                            try:
-                                old_candidate.unlink()
-                                GLOBAL_FOLDER_INDEX.unregister_file(old_candidate)
-                                logger.info(f"Removed obsolete lower quality sidecar: {old_candidate.name}")
-                            except Exception as e:
-                                logger.warning(f"Could not remove old sidecar {old_candidate}: {e}")
+                for ext in exts:
+                    old_candidate = dest_dir / f"{audio_path.stem}{ext}"
+                    if old_candidate == target_path or not old_candidate.is_file():
+                        continue
+                    if not replace_existing:
+                        old_rank = get_sidecar_rank(old_candidate, fmt)
+                        if old_rank is None or old_rank[0] > new_sync:
+                            continue  # keep more precisely synced (or unreadable) lyrics
+                    try:
+                        old_candidate.unlink()
+                        GLOBAL_FOLDER_INDEX.unregister_file(old_candidate)
+                        logger.info(f"Removed superseded sidecar: {old_candidate.name}")
+                    except Exception as e:
+                        logger.warning(f"Could not remove old sidecar {old_candidate}: {e}")
 
         return target_path
     except Exception as e:
@@ -322,6 +336,7 @@ def save_lyrics_for_track(
     remove_lower_quality: bool = True,
     enhanced_lrc: bool = True,
     music_dir: Optional[Path] = None,
+    replace_existing: bool = False,
 ) -> Tuple[Optional[Path], bool]:
     """Save lyrics according to the configured storage mode: sidecar, embedded, or both.
     
@@ -341,6 +356,7 @@ def save_lyrics_for_track(
             remove_lower_quality=remove_lower_quality,
             output_dir=output_dir,
             music_dir=music_dir,
+            replace_existing=replace_existing,
         )
 
     # 2. Embed lyrics in audio file tags if mode is 'embedded' or 'both'
